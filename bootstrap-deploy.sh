@@ -45,6 +45,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="$SCRIPT_DIR/git-deploy-workflow.zsh"
+LIB_SOURCE="$SCRIPT_DIR/git-deploy-lib.zsh"
+LIB_DEST="$HOME/.git-deploy-lib.zsh"
 
 ZSHRC="$HOME/.zshrc"
 SSH_CONFIG="$HOME/.ssh/config"
@@ -165,20 +167,21 @@ append_block() {
 # ---------------------------------------------------------------------
 
 # Render the template with project-specific names + paths.
+# The new template is small — it sources the shared lib, sets context,
+# and defines thin wrappers. This function does straight string
+# substitution against the `ship` placeholder names.
+#
 # render_workflow <prefix> <project_label> <repo_path> <ssh_host>
 #                 <server_path> <zip_path>
 render_workflow() {
   local prefix="$1" label="$2" repo="$3" ssh_host="$4"
   local server_path="$5" zip_path="$6"
-  local upper_prefix
-  upper_prefix="$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')"
 
-  # The template uses the `ship` prefix throughout. Substitute the
-  # user's chosen prefix in: function names, internal helpers, variables.
-  # Do `_ship_` and `SHIP_` first so we don't double-rewrite.
+  # Order matters: replace `_ship_ctx` and `deploy-ship` patterns before
+  # the generic `ship*` -> `${prefix}*` rules so we don't double-rewrite.
   sed \
-    -e "s/_ship_/_${prefix}_/g" \
-    -e "s/SHIP_/${upper_prefix}_/g" \
+    -e "s/_ship_ctx/_${prefix}_ctx/g" \
+    -e "s/deploy-ship/deploy-${prefix}/g" \
     -e "s/shippull/${prefix}pull/g" \
     -e "s/shippush/${prefix}push/g" \
     -e "s/shipbranch/${prefix}branch/g" \
@@ -186,25 +189,37 @@ render_workflow() {
     -e "s/shipstatus/${prefix}status/g" \
     -e "s/shipzip/${prefix}zip/g" \
     -e "s/shiphelp/${prefix}help/g" \
-    -e "s/deploy-ship/deploy-${prefix}/g" \
     "$TEMPLATE" |
-  awk -v repo="$repo" -v host="$ssh_host" \
-      -v server="$server_path" -v zip="$zip_path" \
-      -v upper="$upper_prefix" -v label="$label" '
-    {
-      if ($0 ~ "^"upper"_REPO=") {
-        print upper"_REPO=\""repo"\""
-      } else if ($0 ~ "^"upper"_SSH_HOST=") {
-        print upper"_SSH_HOST=\""host"\""
-      } else if ($0 ~ "^"upper"_SERVER_PATH=") {
-        print upper"_SERVER_PATH='\''"server"'\''"
-      } else if ($0 ~ "^"upper"_ZIP_OUTPUT=") {
-        print upper"_ZIP_OUTPUT=\""zip"\""
-      } else {
-        print
-      }
-    }
+  awk -v prefix="$prefix" -v label="$label" \
+      -v repo="$repo" -v host="$ssh_host" \
+      -v server="$server_path" -v zip="$zip_path" '
+    /^  GDW_PREFIX=/        { print "  GDW_PREFIX=\""prefix"\""; next }
+    /^  GDW_LABEL=/         { print "  GDW_LABEL=\""label"\""; next }
+    /^  GDW_REPO=/          { print "  GDW_REPO=\""repo"\""; next }
+    /^  GDW_SSH_HOST=/      { print "  GDW_SSH_HOST=\""host"\""; next }
+    /^  GDW_SERVER_PATH=/   { print "  GDW_SERVER_PATH='\''"server"'\''"; next }
+    /^  GDW_ZIP_OUTPUT=/    { print "  GDW_ZIP_OUTPUT=\""zip"\""; next }
+    { print }
   '
+}
+
+
+# Install the shared lib (once per machine). Idempotent — copies if the
+# repo's lib is newer or if the destination is missing.
+install_shared_lib() {
+  if [ ! -f "$LIB_SOURCE" ]; then
+    err "Shared library not found at $LIB_SOURCE"
+    err "Run this script from inside the cloned repo."
+    exit 1
+  fi
+
+  if [ ! -f "$LIB_DEST" ] || ! cmp -s "$LIB_SOURCE" "$LIB_DEST"; then
+    cp "$LIB_SOURCE" "$LIB_DEST"
+    chmod 644 "$LIB_DEST"
+    ok "  Installed shared library: $LIB_DEST"
+  else
+    info "  Shared library already up to date: $LIB_DEST"
+  fi
 }
 
 
@@ -289,6 +304,100 @@ check_existing_setup() {
 
   return $((1 - found))
 }
+
+# Offer to SSH into the server and set up the deploy key interactively.
+# Runs as part of the install flow's "next steps" section.
+#
+# Reads from the install-flow scope: $SSH_HOST, $PROJECT_PREFIX,
+# $PROJECT_LABEL, $SERVER_PATH.
+server_side_setup_offer() {
+  echo
+  cat <<EOF
+  3) Server-side deploy key
+EOF
+  echo
+  if ! confirm "     Set up the deploy key on $SSH_HOST now?"; then
+    info "  Skipping — see manual commands below."
+    return 0
+  fi
+
+  local remote_key="\$HOME/.ssh/${PROJECT_PREFIX}_github_deploy"
+
+  echo
+  info "  → SSHing into $SSH_HOST to generate the deploy key..."
+  info "    ssh-keygen will prompt for a passphrase. Pick a strong one."
+  echo
+
+  # Run ssh-keygen on the server interactively. -t allocates a TTY so the
+  # passphrase prompt actually works. The remote command checks for an
+  # existing key first so we don't overwrite anything.
+  if ! ssh -t "$SSH_HOST" "
+    if [ -f $remote_key ]; then
+      echo 'A key already exists at $remote_key — leaving it alone.'
+      echo 'If you want a fresh one, delete it first and re-run this section.'
+    else
+      ssh-keygen -t ed25519 -C '$PROJECT_LABEL deploy' -f $remote_key
+    fi
+  "; then
+    err "  Server-side keygen failed."
+    return 1
+  fi
+
+  echo
+  info "  → Reading the public key..."
+  echo
+  echo "  ─── Copy everything between the lines ───"
+  echo
+  ssh "$SSH_HOST" "cat $remote_key.pub" || {
+    err "  Could not read the public key from the server."
+    return 1
+  }
+  echo
+  echo "  ─── End of public key ───"
+  echo
+
+  cat <<EOF
+  Now in your browser:
+
+    1. Open  https://github.com/<you>/<your-repo>/settings/keys
+    2. Click "Add deploy key"
+    3. Paste the key above into the Key field
+    4. Title it: $PROJECT_LABEL deploy
+    5. **Leave "Allow write access" unchecked** — this key is read-only.
+    6. Click "Add key"
+EOF
+
+  # On macOS, offer to open the GitHub keys page directly.
+  if command -v open >/dev/null 2>&1; then
+    echo
+    if confirm "     Open the GitHub deploy-keys page in your browser?"; then
+      # We don't know the repo URL; open the GitHub home so the user can
+      # navigate. Could be made smarter if we knew the repo.
+      open "https://github.com/" 2>/dev/null || true
+    fi
+  fi
+
+  echo
+  if ! confirm "     Done adding the key on GitHub? Test SSH from the server now?"; then
+    info "  Skipping the test."
+    return 0
+  fi
+
+  echo
+  info "  → Testing GitHub SSH access from the server..."
+  # `ssh -T git@github.com` exits non-zero by design (GitHub doesn't
+  # allow shell access), but prints "Hi <user>!" on success.
+  ssh "$SSH_HOST" "
+    eval \$(ssh-agent -s) >/dev/null
+    ssh-add $remote_key 2>/dev/null
+    ssh -T -o BatchMode=no git@github.com
+  " || true
+
+  echo
+  ok "  Server-side setup complete (or partially complete — read the output above)."
+  return 0
+}
+
 
 # Returns 0 if ~/.ssh/config already has a `Host github.com` line OUTSIDE
 # any of our marker blocks (i.e. a pre-existing user-managed github config).
@@ -458,7 +567,11 @@ EOF
   fi
 
   # ----- Apply ------------------------------------------------
+  section "Installing shared library"
+  install_shared_lib
+
   section "Generating SSH keys"
+  info "  ssh-keygen will prompt for a passphrase — pick a strong one."
   generate_key "$GITHUB_KEY" "${PROJECT_LABEL} — github"
   if [ "$HAS_SERVER" -eq 1 ]; then
     generate_key "$SERVER_KEY" "${PROJECT_LABEL} — server deploy"
@@ -518,27 +631,42 @@ EOF
   echo
 
   if [ "$HAS_SERVER" -eq 1 ]; then
+    server_side_setup_offer
     cat <<EOF
-  3) On your production server (one-time):
+  Manual server-side commands (if you skipped or need to redo it):
+
        ssh $SSH_HOST
-       ssh-keygen -t ed25519 -C "$PROJECT_LABEL deploy" -f ~/.ssh/${PROJECT_PREFIX}_github_deploy -N ""
+       ssh-keygen -t ed25519 -C "$PROJECT_LABEL deploy" -f ~/.ssh/${PROJECT_PREFIX}_github_deploy
+       # ssh-keygen will prompt for a passphrase — pick a strong one.
        cat ~/.ssh/${PROJECT_PREFIX}_github_deploy.pub
        # paste THAT public key at https://github.com/<you>/<repo>/settings/keys
        # IMPORTANT: leave "Allow write access" UNCHECKED (read-only).
 
-  4) Then on the server, add this to ~/.ssh/config:
+  Server-side ~/.ssh/config snippet:
+
        Host github.com
          User git
          IdentityFile ~/.ssh/${PROJECT_PREFIX}_github_deploy
          IdentitiesOnly yes
 
-  5) Test from the server:
-       ssh -T git@github.com
+  If the server already has a Host github.com block for another repo,
+  use a unique alias instead so each repo can carry its own deploy key:
 
-  6) Clone (or initialize) the repo on the server at:
+       Host github-${PROJECT_PREFIX}
+         HostName github.com
+         User git
+         IdentityFile ~/.ssh/${PROJECT_PREFIX}_github_deploy
+         IdentitiesOnly yes
+
+  Then clone with: git clone git\@github-${PROJECT_PREFIX}:you/your-repo.git
+
+  Test from the server:
+       ssh -T git@github.com         # (or your alias)
+
+  Clone (or initialize) the repo at:
        $SERVER_PATH
 
-  7) Back on your laptop, you're ready:
+  Then on your laptop:
        ${PROJECT_PREFIX}pull
        # ... edit ...
        ${PROJECT_PREFIX}push "first deploy"
@@ -614,6 +742,20 @@ uninstall_flow() {
   ok "Uninstall complete."
   info "If you also want to remove the workflow file:"
   echo "    rm $WORKFLOW_DEST"
+
+  # Count marker blocks still in ~/.zshrc. If zero remain, no project
+  # is sourcing the lib anymore, so we can suggest removing it.
+  local other_projects=0
+  if [ -f "$ZSHRC" ]; then
+    other_projects=$(grep -cE '^# >>> [a-z][a-z0-9_]* git deploy workflow >>>' "$ZSHRC" 2>/dev/null | tr -d ' \n' || echo 0)
+  fi
+  if [ -f "$LIB_DEST" ] && [ "$other_projects" -eq 0 ]; then
+    info "No other projects are sourcing the shared library. You can remove it:"
+    echo "    rm $LIB_DEST"
+  elif [ -f "$LIB_DEST" ]; then
+    info "Shared library left in place ($other_projects other project(s) still use it)."
+  fi
+
   info "And the SSH keys (if you generated them):"
   echo "    rm ~/.ssh/${PROJECT_PREFIX}_github  ~/.ssh/${PROJECT_PREFIX}_github.pub"
   echo "    rm ~/.ssh/${PROJECT_PREFIX}_server  ~/.ssh/${PROJECT_PREFIX}_server.pub"

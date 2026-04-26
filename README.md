@@ -30,6 +30,7 @@ This workflow is for the middle ground: a project you actually own end-to-end, w
 - [Quick start](#quick-start)
 - [Modes](#modes)
 - [Safety and idempotence](#safety-and-idempotence)
+- [Architecture](#architecture)
 - [What you get](#what-you-get)
 - [What the bootstrap does](#what-the-bootstrap-does)
 - [Manual setup](#manual-setup)
@@ -129,7 +130,8 @@ In order, on your laptop:
 3. **Renders the workflow template** — runs `git-deploy-workflow.zsh` through `sed` + `awk` to substitute your prefix everywhere (`shippull` → `acmepull`, `SHIP_*` → `ACME_*`, etc.) and bake in your paths.
 4. **Patches `~/.zshrc`** — adds a single `source` line, also wrapped in marker lines.
 5. **Backs up everything** — both `~/.zshrc` and `~/.ssh/config` get timestamped `.bak.YYYYMMDD-HHMMSS` copies before any modification.
-6. **Prints next steps** — what you have to do off-machine: paste your GitHub pubkey to GitHub, generate the deploy key on the server, register it as a read-only Deploy Key on the repo.
+6. **Offers to set up the server-side deploy key for you** — at the end of the install, the bootstrap can SSH into your server, run `ssh-keygen` (with passphrase prompt), display the resulting public key for you to paste into the repo's Deploy Keys page on GitHub, and test the SSH connection back to GitHub from the server. You can also skip this and copy/paste the printed manual commands instead.
+7. **Prints next steps** — exactly what you still have to do off-machine: paste your GitHub pubkey to GitHub Settings, paste the server's deploy pubkey to the repo's Deploy Keys page, clone the repo on the server.
 
 ## Manual setup
 
@@ -186,18 +188,49 @@ bash bootstrap-deploy.sh --uninstall
 
 Asks which prefix to remove, then strips the corresponding marker blocks from `~/.zshrc` and `~/.ssh/config`. Leaves your SSH keys and the rendered workflow file in place — it tells you the exact `rm` commands if you want them gone too. Backups are made before any modification.
 
+## Architecture
+
+The workflow uses a **shared library + thin per-project wrappers** pattern. After running the bootstrap for `acme` and `widgetco` and `theme`, your home directory looks like:
+
+```
+~/.git-deploy-lib.zsh      # ← shared logic, ~250 lines, installed once
+~/.acme-workflow.zsh       # ← ~50 lines: context + 8 wrappers
+~/.widgetco-workflow.zsh   # ← ~50 lines: context + 8 wrappers
+~/.theme-workflow.zsh      # ← ~50 lines: context + 8 wrappers
+```
+
+The library defines generic functions (`_gdw_pull`, `_gdw_push`, etc.) that read their config from environment variables (`GDW_REPO`, `GDW_SSH_HOST`, …). Each per-project file is just a context-setter plus eight one-liner wrappers:
+
+```zsh
+_acme_ctx() {
+  GDW_PREFIX="acme"
+  GDW_LABEL="Acme Plugin"
+  GDW_REPO="$HOME/Code/acme"
+  GDW_SSH_HOST="acme-prod"
+  GDW_SERVER_PATH='$HOME/wp-content/plugins/acme'
+  GDW_ZIP_OUTPUT="$HOME/Downloads/acme-review.zip"
+}
+
+acmepull()    { _acme_ctx; _gdw_pull "$@"; }
+acmepush()    { _acme_ctx; _gdw_push "$@"; }
+# ...etc.
+```
+
+The bootstrap installs/updates the shared library every run, so library improvements ship to every project on the next bootstrap. If you want to fix a bug in `_gdw_push`, you fix it once in `git-deploy-lib.zsh` and re-run the bootstrap.
+
 ## Project structure
 
 ```
 zsh-git-deploy-workflow/
-├── git-deploy-workflow.zsh   # The sourceable zsh function library (template)
+├── git-deploy-lib.zsh        # Shared workflow logic (sourced by all projects)
+├── git-deploy-workflow.zsh   # Per-project template (rendered by the bootstrap)
 ├── bootstrap-deploy.sh       # Interactive installer / uninstaller
 ├── README.md                 # You are here
 ├── LICENSE                   # MIT
 └── .gitignore
 ```
 
-That's the whole project. Two files of code, the rest is documentation.
+Three files of code; everything else is documentation.
 
 ## Security model
 
