@@ -36,6 +36,12 @@ _ship_ctx() {
   GDW_SSH_HOST="example-host"
   GDW_SERVER_PATH='$HOME/path/to/your-project'
   GDW_ZIP_OUTPUT="$HOME/Downloads/your-project-review.zip"
+
+  # Optional. Set this when the server uses a repo-specific SSH alias
+  # (e.g. github-yourproject) for its read-only deploy key. The alias
+  # lives in the SERVER's ~/.ssh/config, not yours. If empty, the
+  # deploy step uses the local repo's `remote.origin.url` instead.
+  GDW_SERVER_REMOTE=""
 }
 
 

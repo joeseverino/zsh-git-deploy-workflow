@@ -234,10 +234,10 @@ expand_ssh_path() {
 # substitution against the `ship` placeholder names.
 #
 # render_workflow <prefix> <project_label> <repo_path> <ssh_host>
-#                 <server_path> <zip_path>
+#                 <server_path> <zip_path> <server_remote>
 render_workflow() {
   local prefix="$1" label="$2" repo="$3" ssh_host="$4"
-  local server_path="$5" zip_path="$6"
+  local server_path="$5" zip_path="$6" server_remote="${7:-}"
 
   # Order matters: replace `_ship_ctx` and `deploy-ship` patterns before
   # the generic `ship*` -> `${prefix}*` rules so we don't double-rewrite.
@@ -254,13 +254,15 @@ render_workflow() {
     "$TEMPLATE" |
   awk -v prefix="$prefix" -v label="$label" \
       -v repo="$repo" -v host="$ssh_host" \
-      -v server="$server_path" -v zip="$zip_path" '
+      -v server="$server_path" -v zip="$zip_path" \
+      -v server_remote="$server_remote" '
     /^  GDW_PREFIX=/        { print "  GDW_PREFIX=\""prefix"\""; next }
     /^  GDW_LABEL=/         { print "  GDW_LABEL=\""label"\""; next }
     /^  GDW_REPO=/          { print "  GDW_REPO=\""repo"\""; next }
     /^  GDW_SSH_HOST=/      { print "  GDW_SSH_HOST=\""host"\""; next }
     /^  GDW_SERVER_PATH=/   { print "  GDW_SERVER_PATH='\''"server"'\''"; next }
     /^  GDW_ZIP_OUTPUT=/    { print "  GDW_ZIP_OUTPUT=\""zip"\""; next }
+    /^  GDW_SERVER_REMOTE=/ { print "  GDW_SERVER_REMOTE=\""server_remote"\""; next }
     { print }
   '
 }
@@ -383,41 +385,74 @@ check_existing_setup() {
 # Offer to SSH into the server and set up the deploy key interactively.
 # Runs as part of the install flow's "next steps" section.
 #
+# Steps performed remotely (each safe to re-run):
+#   1. Ensure ~/.ssh exists with mode 700.
+#   2. Generate ~/.ssh/<prefix>_github_deploy with a passphrase prompt
+#      (skipped if the key already exists).
+#   3. Append a marker-bracketed `Host <SERVER_GITHUB_ALIAS>` block to
+#      ~/.ssh/config pointing at the new key (skipped if the marker is
+#      already there).
+#   4. Tighten permissions on the key files and ssh config.
+#   5. Print the public key for manual paste into GitHub Deploy Keys.
+#   6. Optionally test the alias with `ssh -T git@<alias>`.
+#
 # Reads from install-flow scope: $SSH_HOST, $PROJECT_PREFIX,
-# $PROJECT_LABEL, $SERVER_PATH.
+# $PROJECT_LABEL, $SERVER_PATH, $SERVER_GITHUB_ALIAS.
 server_side_setup_offer() {
   echo
   cat <<EOF
-  3) Server-side deploy key
+  3) Server-side deploy key + SSH alias
 EOF
   echo
 
-  if ! confirm "     Set up the server-side GitHub deploy key on $SSH_HOST now?"; then
+  if ! confirm "     Set up the server-side deploy key + SSH alias on $SSH_HOST now?"; then
     info "  Skipping — see manual commands below."
     return 0
   fi
 
   local remote_key="\$HOME/.ssh/${PROJECT_PREFIX}_github_deploy"
+  local marker_start="# >>> ${PROJECT_PREFIX} ${SERVER_GITHUB_ALIAS} alias >>>"
+  local marker_end="# <<< ${PROJECT_PREFIX} ${SERVER_GITHUB_ALIAS} alias <<<"
 
   echo
-  info "  → SSHing into $SSH_HOST to generate the deploy key..."
-  info "    ssh-keygen will prompt for a passphrase. Pick a strong one."
+  info "  → SSHing into $SSH_HOST..."
+  info "    If a new key needs to be generated, ssh-keygen will prompt"
+  info "    for a passphrase. Pick a strong one."
   echo
 
-  # Run ssh-keygen on the server interactively. -t allocates a TTY so the
-  # passphrase prompt works. The remote command checks for an existing
-  # key first so we do not overwrite anything.
+  # Single SSH session that does everything. -t allocates a TTY so the
+  # passphrase prompt works. Each step checks for existing state and is
+  # safe to re-run.
   if ! ssh -t "$SSH_HOST" "
+    set -e
+
+    # 1. ~/.ssh exists with correct permissions
     mkdir -p \$HOME/.ssh
     chmod 700 \$HOME/.ssh
+
+    # 2. Deploy key — only generate if missing
     if [ -f $remote_key ]; then
-      echo 'A key already exists at $remote_key — leaving it alone.'
-      echo 'If you want a fresh one, delete it first and re-run this section.'
+      echo 'Deploy key already exists at $remote_key — leaving it alone.'
+      echo '(Delete it first if you want a fresh one.)'
     else
       ssh-keygen -t ed25519 -C '$PROJECT_LABEL deploy' -f $remote_key
     fi
+    chmod 600 $remote_key
+    chmod 644 ${remote_key}.pub
+
+    # 3. Add Host alias block to ~/.ssh/config (idempotent via marker)
+    touch \$HOME/.ssh/config
+    chmod 600 \$HOME/.ssh/config
+    if grep -Fq '$marker_start' \$HOME/.ssh/config; then
+      echo 'Host alias block for $SERVER_GITHUB_ALIAS already present — leaving it alone.'
+    else
+      printf '\n%s\nHost %s\n  HostName github.com\n  User git\n  IdentityFile %s\n  IdentitiesOnly yes\n%s\n' \
+        '$marker_start' '$SERVER_GITHUB_ALIAS' '$remote_key' '$marker_end' \
+        >> \$HOME/.ssh/config
+      echo 'Added Host $SERVER_GITHUB_ALIAS block to ~/.ssh/config.'
+    fi
   "; then
-    err "  Server-side keygen failed."
+    err "  Server-side setup failed."
     return 1
   fi
 
@@ -454,20 +489,16 @@ EOF
   fi
 
   echo
-  if ! confirm "     Done adding the key on GitHub? Test SSH from the server now?"; then
+  if ! confirm "     Done adding the key on GitHub? Test the alias from the server now?"; then
     info "  Skipping the test."
     return 0
   fi
 
   echo
-  info "  → Testing GitHub SSH access from the server..."
-  # `ssh -T git@github.com` exits non-zero by design because GitHub does
-  # not allow shell access, but it prints "Hi <user>!" on success.
-  ssh "$SSH_HOST" "
-    eval \$(ssh-agent -s) >/dev/null
-    ssh-add $remote_key 2>/dev/null
-    ssh -T -o BatchMode=no git@github.com
-  " || true
+  info "  → Testing 'ssh -T git@$SERVER_GITHUB_ALIAS' from the server..."
+  info "    Expected output: 'Hi <you>/<repo>! You've successfully authenticated...'"
+  info "    (The non-zero exit is normal — GitHub doesn't allow shell access.)"
+  ssh "$SSH_HOST" "ssh -T -o BatchMode=no git@$SERVER_GITHUB_ALIAS" || true
 
   echo
   ok "  Server-side setup complete. Read the output above for the GitHub SSH test result."
@@ -561,6 +592,8 @@ EOF
   SSH_USER=""
   SSH_PORT=""
   SERVER_KEY=""
+  SERVER_GITHUB_ALIAS=""
+  SERVER_REMOTE=""
   ADD_SERVER_HOST=0
 
   if [ "$HAS_SERVER" -eq 1 ]; then
@@ -635,6 +668,35 @@ EOF
       SERVER_KEY="$(ask 'Server key path to use or create' "$HOME/.ssh/${PROJECT_PREFIX}_server")"
       ADD_SERVER_HOST=1
     fi
+
+    # ----- Server-side GitHub alias (per-repo deploy key) ------------
+    section "Server-side GitHub deploy key"
+    cat <<'EOF'
+The server fetches the repo through a unique SSH alias so each repo
+can have its own read-only deploy key. The alias lives in the SERVER's
+~/.ssh/config (the bootstrap will write it there for you), so it does
+NOT need to exist on this Mac and your local origin URL is unchanged.
+
+Recommended naming: github-<prefix>  (e.g. github-theme).
+EOF
+    echo
+    SERVER_GITHUB_ALIAS="$(ask 'Server-side GitHub host alias' "github-${PROJECT_PREFIX}")"
+
+    # Try to derive the server remote URL from the local repo's origin.
+    local local_origin=""
+    if [ -d "$REPO_PATH/.git" ]; then
+      local_origin="$(cd "$REPO_PATH" && git config --get remote.origin.url 2>/dev/null || true)"
+    fi
+    local server_remote_default=""
+    if [ -n "$local_origin" ]; then
+      # Swap github.com for the alias to produce e.g.
+      #   git@github.com:user/repo.git  ->  git@github-theme:user/repo.git
+      server_remote_default="$(printf '%s' "$local_origin" | sed "s|@github\.com:|@${SERVER_GITHUB_ALIAS}:|")"
+    fi
+    if [ -z "$server_remote_default" ]; then
+      server_remote_default="git@${SERVER_GITHUB_ALIAS}:<you>/<repo>.git"
+    fi
+    SERVER_REMOTE="$(ask 'Server-side GitHub remote URL (uses the alias above)' "$server_remote_default")"
   fi
 
   WORKFLOW_DEST="$HOME/.${PROJECT_PREFIX}-workflow.zsh"
@@ -669,6 +731,12 @@ EOF
     plan "                 Server: $SERVER_KEY"
   fi
   plan "                 Existing keys are reused; missing keys are created."
+
+  if [ "$HAS_SERVER" -eq 1 ]; then
+    plan "Server-side:     deploy key + Host $SERVER_GITHUB_ALIAS in remote ~/.ssh/config"
+    plan "                 (set up interactively after the local install)"
+    plan "Server remote:   $SERVER_REMOTE"
+  fi
   echo
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -723,7 +791,7 @@ EOF
   fi
 
   section "Rendering workflow file"
-  render_workflow "$PROJECT_PREFIX" "$PROJECT_LABEL" "$REPO_PATH" "$SSH_HOST" "$SERVER_PATH" "$ZIP_PATH" >"$WORKFLOW_DEST"
+  render_workflow "$PROJECT_PREFIX" "$PROJECT_LABEL" "$REPO_PATH" "$SSH_HOST" "$SERVER_PATH" "$ZIP_PATH" "$SERVER_REMOTE" >"$WORKFLOW_DEST"
   chmod 644 "$WORKFLOW_DEST"
   ok "  Wrote: $WORKFLOW_DEST"
 

@@ -5,13 +5,19 @@
 # workflow functions (`_gdw_pull`, `_gdw_push`, etc.) that read their
 # project-specific configuration from environment variables:
 #
-#   GDW_PREFIX       Command prefix for messages and help text.
-#   GDW_LABEL        Human-readable project label.
-#   GDW_REPO         Local clone path.
-#   GDW_SSH_HOST     SSH host alias for the production server.
-#                    Empty = no-server mode (deploy step is skipped).
-#   GDW_SERVER_PATH  Path to the project on the server.
-#   GDW_ZIP_OUTPUT   Where to write the release zip.
+#   GDW_PREFIX         Command prefix for messages and help text.
+#   GDW_LABEL          Human-readable project label.
+#   GDW_REPO           Local clone path.
+#   GDW_SSH_HOST       SSH host alias for the production server.
+#                      Empty = no-server mode (deploy step is skipped).
+#   GDW_SERVER_PATH    Path to the project on the server.
+#   GDW_SERVER_REMOTE  (optional) Git remote URL the server should use
+#                      to clone/pull. Use a server-side SSH alias here
+#                      (e.g. git@github-theme:user/repo.git) when the
+#                      server's deploy key is registered under a host
+#                      alias rather than the bare github.com host.
+#                      If empty, falls back to the local origin URL.
+#   GDW_ZIP_OUTPUT     Where to write the release zip.
 #
 # A per-project file (`~/.<prefix>-workflow.zsh`) sets these variables
 # and defines thin wrappers that call into here. This keeps the
@@ -88,21 +94,37 @@ _gdw_branch() {
 
 
 # SSH into the server and deploy the current GitHub repo.
-# If the server path does not exist yet, create the parent directory and clone.
-# If the server path exists and is already a Git repo, pull --ff-only.
-# If the server path exists but is not a Git repo, stop safely.
+#
+# Resolves the remote URL the SERVER will use in this order:
+#   1. $GDW_SERVER_REMOTE if set (typical when the server uses a
+#      repo-specific SSH alias like github-theme).
+#   2. The local repo's `remote.origin.url` (typical when the server
+#      has a generic Host github.com block pointing at a deploy key).
+#
+# Behavior at the destination:
+#   - If $GDW_SERVER_PATH does not exist: create the parent dir and
+#     `git clone` the resolved remote_url into place.
+#   - If it exists and is a Git repo: `git fetch && git checkout main
+#     && git pull --ff-only`.
+#   - If it exists but is NOT a Git repo: refuse to touch it. The
+#     operator must move it aside manually first.
+#
 # No-op if no server is configured.
 _gdw_deploy() {
   if [ -z "$GDW_SSH_HOST" ] || [ -z "$GDW_SERVER_PATH" ]; then
     return 0
   fi
+
   local remote_url
-  remote_url="$(git config --get remote.origin.url)"
+  remote_url="${GDW_SERVER_REMOTE:-$(git config --get remote.origin.url)}"
+
   if [ -z "$remote_url" ]; then
-    _gdw_err "Deployment failed. No origin remote found in local repo."
+    _gdw_err "Deployment failed. No remote URL found (neither GDW_SERVER_REMOTE nor local origin)."
     return 1
   fi
+
   echo "Deploying to server..."
+
   if ssh "$GDW_SSH_HOST" "
     set -e
     server_path='$GDW_SERVER_PATH'
@@ -254,6 +276,9 @@ EOF
   if [ -n "$GDW_SSH_HOST" ]; then
     echo "  SSH host:    $GDW_SSH_HOST"
     echo "  Server path: $GDW_SERVER_PATH"
+    if [ -n "$GDW_SERVER_REMOTE" ]; then
+      echo "  Server remote: $GDW_SERVER_REMOTE"
+    fi
   else
     echo "  Deploy:      (no server configured — ${GDW_PREFIX}push is commit + push only)"
   fi
