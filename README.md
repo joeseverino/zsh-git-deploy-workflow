@@ -54,6 +54,20 @@ No language runtime, package manager, or dependency installation required.
 
 ## Quick start
 
+### Brand-new project (zero to first commit + deploy in one go)
+
+If you're starting from scratch — no repo, no GitHub, nothing — use the scaffolder:
+
+```sh
+mkdir my-new-thing
+cd my-new-thing
+bash ~/path/to/zsh-git-deploy-workflow/init-project.sh
+```
+
+It prompts for project name / type / license / GitHub handle, generates a sensible `.gitignore` (WordPress plugin, WordPress theme, Node.js, Python, or generic), README.md, and LICENSE, runs `git init` + `git commit`, sets the remote, and either runs `gh repo create` (if you have the GitHub CLI) or prints the manual `git push` commands. At the end it offers to chain into the deploy bootstrap so you go from empty folder to live deploy without breaking flow.
+
+### Existing project (just wire up the deploy)
+
 ```sh
 git clone git@github.com:joeseverino/zsh-git-deploy-workflow.git
 cd zsh-git-deploy-workflow
@@ -225,12 +239,13 @@ zsh-git-deploy-workflow/
 ├── git-deploy-lib.zsh        # Shared workflow logic (sourced by all projects)
 ├── git-deploy-workflow.zsh   # Per-project template (rendered by the bootstrap)
 ├── bootstrap-deploy.sh       # Interactive installer / uninstaller
+├── init-project.sh           # New-project scaffolder (optionally chains into bootstrap)
 ├── README.md                 # You are here
 ├── LICENSE                   # MIT
 └── .gitignore
 ```
 
-Three files of code; everything else is documentation.
+Four files of code; everything else is documentation.
 
 ## Security model
 

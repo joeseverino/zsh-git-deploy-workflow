@@ -410,19 +410,30 @@ EOF
     return 0
   fi
 
-  local remote_key="\$HOME/.ssh/${PROJECT_PREFIX}_github_deploy"
+  # Use tilde (~) rather than $HOME so the same path string works in
+  # BOTH shell commands (where the remote shell expands ~) AND inside
+  # ~/.ssh/config IdentityFile lines (where ssh expands ~ but does NOT
+  # expand $HOME).
+  local remote_key="~/.ssh/${PROJECT_PREFIX}_github_deploy"
   local marker_start="# >>> ${PROJECT_PREFIX} ${SERVER_GITHUB_ALIAS} alias >>>"
   local marker_end="# <<< ${PROJECT_PREFIX} ${SERVER_GITHUB_ALIAS} alias <<<"
 
   echo
   info "  → SSHing into $SSH_HOST..."
-  info "    If a new key needs to be generated, ssh-keygen will prompt"
-  info "    for a passphrase. Pick a strong one."
+  info "    A new deploy key will be generated WITHOUT a passphrase."
+  info "    This is the standard practice for read-only deploy keys —"
+  info "    a passphrase would block non-interactive deploys, and the"
+  info "    security gain is negligible for a key that can only clone"
+  info "    a single repo and is owned by your server user (chmod 600)."
   echo
 
-  # Single SSH session that does everything. -t allocates a TTY so the
-  # passphrase prompt works. Each step checks for existing state and is
-  # safe to re-run.
+  # Single SSH session that does everything. Each step is safe to
+  # re-run; the Host alias block is always stripped-and-rewritten so
+  # config fixes from an updated bootstrap propagate on subsequent runs.
+  #
+  # ssh-keygen uses -N "" (empty passphrase) so the deploy can run
+  # non-interactively. If a key already exists we leave it alone — the
+  # operator can decide whether to keep its passphrase or strip it.
   if ! ssh -t "$SSH_HOST" "
     set -e
 
@@ -433,24 +444,35 @@ EOF
     # 2. Deploy key — only generate if missing
     if [ -f $remote_key ]; then
       echo 'Deploy key already exists at $remote_key — leaving it alone.'
-      echo '(Delete it first if you want a fresh one.)'
+      echo '(Delete it first if you want a fresh one. If the existing'
+      echo 'key has a passphrase and deploys hang, run:'
+      echo '  ssh-keygen -p -f $remote_key'
+      echo 'and set an empty new passphrase.)'
     else
-      ssh-keygen -t ed25519 -C '$PROJECT_LABEL deploy' -f $remote_key
+      ssh-keygen -t ed25519 -N '' -C '$PROJECT_LABEL deploy' -f $remote_key
     fi
     chmod 600 $remote_key
     chmod 644 ${remote_key}.pub
 
-    # 3. Add Host alias block to ~/.ssh/config (idempotent via marker)
+    # 3. (Re)write Host alias block in ~/.ssh/config. Strip any prior
+    # marker-bracketed block first so the latest content always wins.
     touch \$HOME/.ssh/config
     chmod 600 \$HOME/.ssh/config
     if grep -Fq '$marker_start' \$HOME/.ssh/config; then
-      echo 'Host alias block for $SERVER_GITHUB_ALIAS already present — leaving it alone.'
+      awk -v start='$marker_start' -v end='$marker_end' '
+        BEGIN{skip=0}
+        \$0==start{skip=1; next}
+        skip && \$0==end{skip=0; next}
+        !skip{print}
+      ' \$HOME/.ssh/config > \$HOME/.ssh/config.new && mv \$HOME/.ssh/config.new \$HOME/.ssh/config
+      chmod 600 \$HOME/.ssh/config
+      echo 'Refreshed existing Host $SERVER_GITHUB_ALIAS block.'
     else
-      printf '\n%s\nHost %s\n  HostName github.com\n  User git\n  IdentityFile %s\n  IdentitiesOnly yes\n%s\n' \
-        '$marker_start' '$SERVER_GITHUB_ALIAS' '$remote_key' '$marker_end' \
-        >> \$HOME/.ssh/config
-      echo 'Added Host $SERVER_GITHUB_ALIAS block to ~/.ssh/config.'
+      echo 'Adding new Host $SERVER_GITHUB_ALIAS block.'
     fi
+    printf '\n%s\nHost %s\n  HostName github.com\n  User git\n  IdentityFile %s\n  IdentitiesOnly yes\n%s\n' \
+      '$marker_start' '$SERVER_GITHUB_ALIAS' '$remote_key' '$marker_end' \
+      >> \$HOME/.ssh/config
   "; then
     err "  Server-side setup failed."
     return 1
@@ -488,20 +510,50 @@ EOF
     fi
   fi
 
-  echo
-  if ! confirm "     Done adding the key on GitHub? Test the alias from the server now?"; then
-    info "  Skipping the test."
-    return 0
-  fi
+  # Test loop — let the user retry once or twice while they finish
+  # adding the deploy key on GitHub (it usually takes a few seconds for
+  # GitHub to recognize a freshly-added deploy key).
+  local attempt=1
+  while true; do
+    echo
+    if ! confirm "     Done adding the key on GitHub? Test the alias from the server now?"; then
+      info "  Skipping the test."
+      break
+    fi
+
+    echo
+    info "  → Testing 'ssh -T git@$SERVER_GITHUB_ALIAS' from the server (attempt $attempt)..."
+    info "    Expected output: 'Hi <you>/<repo>! You've successfully authenticated...'"
+    info "    (The non-zero exit is normal — GitHub doesn't allow shell access.)"
+    echo
+
+    # Capture both stdout and stderr so we can diagnose failures.
+    local test_output
+    test_output="$(ssh "$SSH_HOST" "ssh -T -o BatchMode=no -o StrictHostKeyChecking=accept-new git@$SERVER_GITHUB_ALIAS" 2>&1 || true)"
+    echo "$test_output"
+
+    if printf '%s' "$test_output" | grep -q "successfully authenticated"; then
+      echo
+      ok "  ✓ GitHub authenticated the deploy key. You're good to go."
+      break
+    fi
+
+    echo
+    warn "  GitHub did not authenticate the key. Common causes:"
+    echo "    - The deploy key wasn't added to the right repo yet."
+    echo "    - The pasted key got truncated (it should start with 'ssh-ed25519' and end with the comment)."
+    echo "    - You added it as an account-level SSH key instead of a repo Deploy Key."
+    echo "    - The IdentityFile path in the server's ~/.ssh/config is wrong"
+    echo "      (look for 'no such identity' above)."
+    echo
+    if ! confirm "     Try again?"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+  done
 
   echo
-  info "  → Testing 'ssh -T git@$SERVER_GITHUB_ALIAS' from the server..."
-  info "    Expected output: 'Hi <you>/<repo>! You've successfully authenticated...'"
-  info "    (The non-zero exit is normal — GitHub doesn't allow shell access.)"
-  ssh "$SSH_HOST" "ssh -T -o BatchMode=no git@$SERVER_GITHUB_ALIAS" || true
-
-  echo
-  ok "  Server-side setup complete. Read the output above for the GitHub SSH test result."
+  ok "  Server-side setup complete."
   return 0
 }
 
@@ -827,7 +879,9 @@ EOF
   Manual server-side commands if you skipped or need to redo it:
 
        ssh $SSH_HOST
-       ssh-keygen -t ed25519 -C "$PROJECT_LABEL deploy" -f ~/.ssh/${PROJECT_PREFIX}_github_deploy
+       # -N '' generates the key WITHOUT a passphrase. This is standard
+       # for read-only deploy keys and required for non-interactive deploy.
+       ssh-keygen -t ed25519 -N '' -C "$PROJECT_LABEL deploy" -f ~/.ssh/${PROJECT_PREFIX}_github_deploy
        cat ~/.ssh/${PROJECT_PREFIX}_github_deploy.pub
        # paste THAT public key at https://github.com/<you>/<repo>/settings/keys
        # IMPORTANT: leave "Allow write access" unchecked.
@@ -878,6 +932,16 @@ EOF
   fi
 
   ok "Bootstrap complete."
+
+  echo
+  _color "1;33" "  ⚠  RELOAD YOUR SHELL to pick up the new functions:"
+  echo "       exec zsh"
+  echo "     (or open a new terminal tab — same effect)"
+  echo
+  echo "     Already-running shells have the OLD function bodies cached."
+  echo "     Without the reload, ${PROJECT_PREFIX}push will silently use stale code"
+  echo "     and may behave unexpectedly."
+  echo
 }
 
 

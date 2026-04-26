@@ -256,6 +256,53 @@ _gdw_zip() {
 }
 
 
+# List every project bootstrapped on this machine. Reads marker
+# blocks out of ~/.zshrc and prints a small table of prefix, label,
+# repo path, and SSH host. Always available (not project-scoped).
+gdw-list() {
+  local zshrc="$HOME/.zshrc"
+  if [ ! -f "$zshrc" ]; then
+    echo "No ~/.zshrc found."
+    return 1
+  fi
+
+  local prefixes
+  prefixes=$(grep -oE '^# >>> [a-z][a-z0-9_]+ git deploy workflow >>>' "$zshrc" 2>/dev/null \
+    | sed -E 's/^# >>> ([a-z][a-z0-9_]+) git deploy workflow >>>$/\1/' \
+    | sort -u)
+
+  if [ -z "$prefixes" ]; then
+    echo "No git-deploy-workflow projects found in $zshrc."
+    echo "Run 'bash <repo>/bootstrap-deploy.sh' from a cloned project to add one."
+    return 0
+  fi
+
+  printf "Configured git-deploy-workflow projects:\n\n"
+  local prefix wf label repo host
+  while IFS= read -r prefix; do
+    [ -z "$prefix" ] && continue
+    wf="$HOME/.${prefix}-workflow.zsh"
+    if [ -f "$wf" ]; then
+      label="$(grep -E '^[[:space:]]*GDW_LABEL=' "$wf" | sed -E 's/.*="(.*)"/\1/' | head -1)"
+      repo="$(grep -E '^[[:space:]]*GDW_REPO=' "$wf" | sed -E 's/.*="(.*)"/\1/' | head -1)"
+      host="$(grep -E '^[[:space:]]*GDW_SSH_HOST=' "$wf" | sed -E 's/.*="(.*)"/\1/' | head -1)"
+      printf '  \033[1m%-12s\033[0m %s\n' "$prefix" "${label:-(no label)}"
+      printf '  %-12s repo:    %s\n' '' "${repo:-(unknown)}"
+      if [ -n "$host" ]; then
+        printf '  %-12s server:  %s\n' '' "$host"
+      else
+        printf '  %-12s server:  (no-server mode)\n' ''
+      fi
+      printf '\n'
+    else
+      printf '  \033[1m%-12s\033[0m (workflow file missing at %s!)\n\n' "$prefix" "$wf"
+    fi
+  done <<< "$prefixes"
+
+  echo "Run <prefix>help for the full command list of a specific project."
+}
+
+
 # Print a quick reference of every command for this project.
 _gdw_help() {
   cat <<EOF
