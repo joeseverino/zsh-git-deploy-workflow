@@ -234,9 +234,8 @@ generate_key() {
 # SSH config block builder
 # ---------------------------------------------------------------------
 
-build_ssh_block() {
-  local ssh_host="$1" hostname="$2" user="$3" port="$4"
-  local server_key="$5" github_key="$6"
+build_github_block() {
+  local github_key="$1"
   cat <<EOF
 Host github.com
   User git
@@ -244,7 +243,12 @@ Host github.com
   UseKeychain yes
   IdentityFile $github_key
   IdentitiesOnly yes
+EOF
+}
 
+build_server_block() {
+  local ssh_host="$1" hostname="$2" user="$3" port="$4" server_key="$5"
+  cat <<EOF
 Host $ssh_host
   HostName $hostname
   User $user
@@ -254,6 +258,49 @@ Host $ssh_host
   AddKeysToAgent yes
   UseKeychain yes
 EOF
+}
+
+
+# ---------------------------------------------------------------------
+# Pre-flight conflict detection
+# ---------------------------------------------------------------------
+
+# Returns 0 if any existing setup with this prefix is detected. Echoes a
+# bullet list of what was found.
+check_existing_setup() {
+  local prefix="$1"
+  local zshrc_marker="${ZSHRC_MARK_START//__PREFIX__/$prefix}"
+  local ssh_marker="${SSH_MARK_START//__PREFIX__/$prefix}"
+  local workflow_file="$HOME/.${prefix}-workflow.zsh"
+  local found=0
+
+  if [ -f "$ZSHRC" ] && grep -Fq "$zshrc_marker" "$ZSHRC"; then
+    echo "  - ~/.zshrc already has a block for prefix '$prefix'"
+    found=1
+  fi
+  if [ -f "$SSH_CONFIG" ] && grep -Fq "$ssh_marker" "$SSH_CONFIG"; then
+    echo "  - ~/.ssh/config already has a block for prefix '$prefix'"
+    found=1
+  fi
+  if [ -f "$workflow_file" ]; then
+    echo "  - Workflow file already exists at $workflow_file"
+    found=1
+  fi
+
+  return $((1 - found))
+}
+
+# Returns 0 if ~/.ssh/config already has a `Host github.com` line OUTSIDE
+# any of our marker blocks (i.e. a pre-existing user-managed github config).
+ssh_config_has_external_github() {
+  [ -f "$SSH_CONFIG" ] || return 1
+  # Strip every marker block we've ever added, then check what's left.
+  awk '
+    BEGIN { skip = 0 }
+    /^# >>> .* (git deploy workflow|deploy hosts) >>>/ { skip = 1; next }
+    skip && /^# <<< .* (git deploy workflow|deploy hosts) <<</ { skip = 0; next }
+    !skip { print }
+  ' "$SSH_CONFIG" | grep -Eq '^[Hh]ost\s+github\.com\b'
 }
 
 
@@ -268,44 +315,136 @@ install_flow() {
     exit 1
   fi
 
+  echo
+  info "git-deploy-workflow bootstrap"
+  cat <<'EOF'
+This will set up an edit/commit/push (and optional /deploy) workflow for
+a project. Nothing is written until you confirm the plan; ~/.zshrc and
+~/.ssh/config are backed up before any modification.
+EOF
+
+  # ----- Mode: with-server vs. no-server ----------------------
+  section "Mode"
+  cat <<'EOF'
+Some projects deploy to a remote server when you push (WordPress
+plugins, Django apps, static sites). Others — private repos, libraries,
+research code — don't have a server to deploy to and you just want the
+git aliases.
+EOF
+  echo
+  HAS_SERVER=1
+  if ! confirm "Do you have a remote server to deploy to?"; then
+    HAS_SERVER=0
+    info "  No-server mode: shippush will commit + push only, no deploy."
+  fi
+
+  # ----- Project identity -------------------------------------
   section "Project info"
   PROJECT_LABEL="$(ask 'Project name (human-readable)' 'My Project')"
-  PROJECT_PREFIX="$(ask 'Command prefix (lowercase letters; e.g. mp gives mppull/mppush)' 'mp')"
+  PROJECT_PREFIX="$(ask 'Command prefix (lowercase; e.g. mp gives mppull/mppush)' 'mp')"
 
   if ! printf '%s' "$PROJECT_PREFIX" | grep -Eq '^[a-z][a-z0-9_]*$'; then
     err "Prefix must start with a lowercase letter and contain only [a-z0-9_]."
     exit 1
   fi
 
-  REPO_PATH="$(ask 'Local clone path of the project' "$HOME/Code/$PROJECT_PREFIX")"
-  SERVER_PATH_DEFAULT='$HOME/path/to/'"$PROJECT_PREFIX"
-  SERVER_PATH="$(ask 'Project path on the server (single quotes preserve $HOME)' "$SERVER_PATH_DEFAULT")"
-  ZIP_PATH="$(ask 'Local zip output path' "$HOME/Downloads/${PROJECT_PREFIX}-review.zip")"
-
-  section "Production server SSH"
-  SSH_HOST="$(ask 'SSH host alias to use locally' "${PROJECT_PREFIX}-prod")"
-  SSH_HOSTNAME="$(ask 'Server hostname or IP' 'example.com')"
-  SSH_USER="$(ask 'Server SSH user' 'deploy')"
-  SSH_PORT="$(ask 'Server SSH port' '22')"
-
-  section "SSH keys"
-  GITHUB_KEY="$(ask 'GitHub key path (will be created if missing)' "$HOME/.ssh/${PROJECT_PREFIX}_github")"
-  SERVER_KEY="$(ask 'Server key path (will be created if missing)' "$HOME/.ssh/${PROJECT_PREFIX}_server")"
-
-  WORKFLOW_DEST="$HOME/.${PROJECT_PREFIX}-workflow.zsh"
-  ZSHRC_BLOCK_BODY="source \"$WORKFLOW_DEST\""
-
   ZSHRC_START="${ZSHRC_MARK_START//__PREFIX__/$PROJECT_PREFIX}"
   ZSHRC_END="${ZSHRC_MARK_END//__PREFIX__/$PROJECT_PREFIX}"
   SSH_START="${SSH_MARK_START//__PREFIX__/$PROJECT_PREFIX}"
   SSH_END="${SSH_MARK_END//__PREFIX__/$PROJECT_PREFIX}"
 
+  # ----- Pre-flight: existing setup with this prefix? ---------
+  if check_existing_setup "$PROJECT_PREFIX" >/tmp/.bootstrap-existing.$$ 2>&1; then
+    section "Existing setup detected"
+    cat /tmp/.bootstrap-existing.$$
+    rm -f /tmp/.bootstrap-existing.$$
+    echo
+    cat <<EOF
+You can:
+  (r) replace — back up the existing files, strip the old marker
+      blocks, and reinstall with the new answers.
+  (a) abort  — pick a different prefix or run with --uninstall first.
+EOF
+    echo
+    local choice
+    read -r -p "  Choose [r/a]: " choice
+    case "$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')" in
+      r|replace) info "  Will replace existing setup." ;;
+      *)         warn "Aborted."; exit 0 ;;
+    esac
+  else
+    rm -f /tmp/.bootstrap-existing.$$
+  fi
+
+  # ----- Project paths ----------------------------------------
+  REPO_PATH="$(ask 'Local clone path of the project' "$HOME/Code/$PROJECT_PREFIX")"
+  ZIP_PATH="$(ask 'Local zip output path (for review/distribution)' "$HOME/Downloads/${PROJECT_PREFIX}-review.zip")"
+
+  # Server-mode-only fields. In no-server mode these stay empty so the
+  # rendered workflow knows there's nothing to deploy.
+  SERVER_PATH=""
+  SSH_HOST=""
+  SSH_HOSTNAME=""
+  SSH_USER=""
+  SSH_PORT=""
+  SERVER_KEY=""
+
+  if [ "$HAS_SERVER" -eq 1 ]; then
+    SERVER_PATH_DEFAULT='$HOME/path/to/'"$PROJECT_PREFIX"
+    SERVER_PATH="$(ask 'Project path on the server (single quotes preserve $HOME)' "$SERVER_PATH_DEFAULT")"
+
+    section "Production server SSH"
+    SSH_HOST="$(ask 'SSH host alias to use locally' "${PROJECT_PREFIX}-prod")"
+    SSH_HOSTNAME="$(ask 'Server hostname or IP' 'example.com')"
+    SSH_USER="$(ask 'Server SSH user' 'deploy')"
+    SSH_PORT="$(ask 'Server SSH port' '22')"
+  fi
+
+  # ----- SSH keys ---------------------------------------------
+  section "SSH keys"
+  GITHUB_KEY="$(ask 'GitHub key path (will be created if missing)' "$HOME/.ssh/${PROJECT_PREFIX}_github")"
+  if [ "$HAS_SERVER" -eq 1 ]; then
+    SERVER_KEY="$(ask 'Server key path (will be created if missing)' "$HOME/.ssh/${PROJECT_PREFIX}_server")"
+  fi
+
+  # ----- Existing github.com block? ---------------------------
+  ADD_GITHUB_HOST=1
+  if ssh_config_has_external_github; then
+    section "Existing github.com config detected"
+    cat <<'EOF'
+Your ~/.ssh/config already has a `Host github.com` block managed
+outside this tool. Adding another one is usually harmless (SSH merges
+multiple blocks), but it can be confusing.
+EOF
+    echo
+    if ! confirm "Add our github.com block anyway?"; then
+      ADD_GITHUB_HOST=0
+      info "  Skipping the github.com block — your existing config will be used."
+    fi
+  fi
+
+  WORKFLOW_DEST="$HOME/.${PROJECT_PREFIX}-workflow.zsh"
+  ZSHRC_BLOCK_BODY="source \"$WORKFLOW_DEST\""
+
+  # ----- Plan -------------------------------------------------
   section "Plan"
   plan "Workflow file:   $WORKFLOW_DEST"
   plan "Functions:       ${PROJECT_PREFIX}pull, ${PROJECT_PREFIX}push, ${PROJECT_PREFIX}branch, ${PROJECT_PREFIX}revert, ${PROJECT_PREFIX}status, ${PROJECT_PREFIX}zip, ${PROJECT_PREFIX}help"
   plan "Patch ~/.zshrc:  add 1 source line"
-  plan "Patch ~/.ssh/config: add Host github.com + Host $SSH_HOST"
-  plan "Generate keys:   $GITHUB_KEY, $SERVER_KEY  (skipped if they exist)"
+  if [ "$ADD_GITHUB_HOST" -eq 1 ] && [ "$HAS_SERVER" -eq 1 ]; then
+    plan "Patch ~/.ssh/config: add Host github.com + Host $SSH_HOST"
+  elif [ "$ADD_GITHUB_HOST" -eq 1 ]; then
+    plan "Patch ~/.ssh/config: add Host github.com"
+  elif [ "$HAS_SERVER" -eq 1 ]; then
+    plan "Patch ~/.ssh/config: add Host $SSH_HOST"
+  else
+    plan "Patch ~/.ssh/config: (nothing to add — no server, existing github)"
+  fi
+  if [ "$HAS_SERVER" -eq 1 ]; then
+    plan "Generate keys:   $GITHUB_KEY, $SERVER_KEY  (skipped if they exist)"
+  else
+    plan "Generate keys:   $GITHUB_KEY  (skipped if it exists)"
+  fi
   echo
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -318,21 +457,35 @@ install_flow() {
     return 0
   fi
 
+  # ----- Apply ------------------------------------------------
   section "Generating SSH keys"
   generate_key "$GITHUB_KEY" "${PROJECT_LABEL} — github"
-  generate_key "$SERVER_KEY" "${PROJECT_LABEL} — server deploy"
-
-  section "Patching ~/.ssh/config"
-  if [ -f "$SSH_CONFIG" ] && grep -Fq "$SSH_START" "$SSH_CONFIG"; then
-    warn "  ~/.ssh/config already has a block for this project — replacing it."
-    backup="$(backup_file "$SSH_CONFIG")"
-    [ -n "${backup:-}" ] && info "  Backup: $backup"
-    strip_block "$SSH_CONFIG" "$SSH_START" "$SSH_END"
+  if [ "$HAS_SERVER" -eq 1 ]; then
+    generate_key "$SERVER_KEY" "${PROJECT_LABEL} — server deploy"
   fi
-  ssh_block_body="$(build_ssh_block "$SSH_HOST" "$SSH_HOSTNAME" "$SSH_USER" "$SSH_PORT" "$SERVER_KEY" "$GITHUB_KEY")"
-  append_block "$SSH_CONFIG" "$SSH_START" "$SSH_END" "$ssh_block_body"
-  chmod 600 "$SSH_CONFIG"
-  ok "  Updated: $SSH_CONFIG"
+
+  # ssh-config patching: only run if there's actually something to add
+  if [ "$ADD_GITHUB_HOST" -eq 1 ] || [ "$HAS_SERVER" -eq 1 ]; then
+    section "Patching ~/.ssh/config"
+    if [ -f "$SSH_CONFIG" ] && grep -Fq "$SSH_START" "$SSH_CONFIG"; then
+      warn "  ~/.ssh/config already has a block for this project — replacing it."
+      backup="$(backup_file "$SSH_CONFIG")"
+      [ -n "${backup:-}" ] && info "  Backup: $backup"
+      strip_block "$SSH_CONFIG" "$SSH_START" "$SSH_END"
+    fi
+
+    ssh_block_body=""
+    if [ "$ADD_GITHUB_HOST" -eq 1 ]; then
+      ssh_block_body+="$(build_github_block "$GITHUB_KEY")"
+    fi
+    if [ "$HAS_SERVER" -eq 1 ]; then
+      [ -n "$ssh_block_body" ] && ssh_block_body+=$'\n\n'
+      ssh_block_body+="$(build_server_block "$SSH_HOST" "$SSH_HOSTNAME" "$SSH_USER" "$SSH_PORT" "$SERVER_KEY")"
+    fi
+    append_block "$SSH_CONFIG" "$SSH_START" "$SSH_END" "$ssh_block_body"
+    chmod 600 "$SSH_CONFIG"
+    ok "  Updated: $SSH_CONFIG"
+  fi
 
   section "Rendering workflow file"
   render_workflow "$PROJECT_PREFIX" "$PROJECT_LABEL" "$REPO_PATH" "$SSH_HOST" "$SERVER_PATH" "$ZIP_PATH" >"$WORKFLOW_DEST"
@@ -341,25 +494,31 @@ install_flow() {
 
   section "Patching ~/.zshrc"
   if [ -f "$ZSHRC" ] && grep -Fq "$ZSHRC_START" "$ZSHRC"; then
-    warn "  ~/.zshrc already sources this workflow — leaving it alone."
+    warn "  ~/.zshrc already has a block for prefix '$PROJECT_PREFIX' — replacing it."
+    backup="$(backup_file "$ZSHRC")"
+    [ -n "${backup:-}" ] && info "  Backup: $backup"
+    strip_block "$ZSHRC" "$ZSHRC_START" "$ZSHRC_END"
   else
     backup="$(backup_file "$ZSHRC")"
     [ -n "${backup:-}" ] && info "  Backup: $backup"
-    append_block "$ZSHRC" "$ZSHRC_START" "$ZSHRC_END" "$ZSHRC_BLOCK_BODY"
-    ok "  Updated: $ZSHRC"
   fi
+  append_block "$ZSHRC" "$ZSHRC_START" "$ZSHRC_END" "$ZSHRC_BLOCK_BODY"
+  ok "  Updated: $ZSHRC"
 
+  # ----- Next steps -------------------------------------------
   section "Done — next steps"
-  cat <<EOF
+  echo
+  echo "  1) Reload your shell, then verify:"
+  echo "       exec zsh"
+  echo "       ${PROJECT_PREFIX}help"
+  echo
+  echo "  2) Add your GitHub key to your GitHub account:"
+  echo "       cat $GITHUB_KEY.pub"
+  echo "       # then paste at https://github.com/settings/keys"
+  echo
 
-  1) Reload your shell, then verify:
-       exec zsh
-       ${PROJECT_PREFIX}help
-
-  2) Add your GitHub key to your GitHub account:
-       cat $GITHUB_KEY.pub
-       # then paste at https://github.com/settings/keys
-
+  if [ "$HAS_SERVER" -eq 1 ]; then
+    cat <<EOF
   3) On your production server (one-time):
        ssh $SSH_HOST
        ssh-keygen -t ed25519 -C "$PROJECT_LABEL deploy" -f ~/.ssh/${PROJECT_PREFIX}_github_deploy -N ""
@@ -385,6 +544,20 @@ install_flow() {
        ${PROJECT_PREFIX}push "first deploy"
 
 EOF
+  else
+    cat <<EOF
+  3) Use the workflow:
+       ${PROJECT_PREFIX}pull
+       # ... edit ...
+       ${PROJECT_PREFIX}push "first commit"
+       # In no-server mode, ${PROJECT_PREFIX}push is just commit + push to GitHub.
+
+  If you add a server later, re-run this bootstrap with the same prefix
+  and choose "replace" — it will add the server piece without losing
+  your config.
+
+EOF
+  fi
   ok "Bootstrap complete."
 }
 

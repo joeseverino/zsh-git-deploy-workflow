@@ -123,7 +123,15 @@ shipbranch() {
 
 # Deploy the approved GitHub version to the live server.
 # Sends one non-interactive SSH command — does not open a shell session.
+#
+# If SHIP_SSH_HOST or SHIP_SERVER_PATH is empty, this is a no-server
+# install (e.g. a private repo with no production target). The function
+# becomes a no-op so shippush still works as a commit+push command.
 deploy-ship() {
+  if [ -z "$SHIP_SSH_HOST" ] || [ -z "$SHIP_SERVER_PATH" ]; then
+    return 0
+  fi
+
   echo "Deploying to server..."
 
   if ssh "$SHIP_SSH_HOST" "cd $SHIP_SERVER_PATH && git pull --ff-only"; then
@@ -135,7 +143,10 @@ deploy-ship() {
 }
 
 
-# Commit, push, and deploy from main in one repeatable command.
+# Commit, push, and (if a server is configured) deploy from main.
+#
+# When SHIP_SSH_HOST is empty this still works — it just becomes a
+# commit + push to GitHub with no deploy step.
 shippush() {
   cd "$SHIP_REPO" || return 1
 
@@ -148,7 +159,7 @@ shippush() {
   current_branch="$(git branch --show-current)"
 
   if [ "$current_branch" != "main" ]; then
-    _ship_warn "shippush only deploys from main. Current branch: $current_branch"
+    _ship_warn "shippush only runs from main. Current branch: $current_branch"
     echo "Use: git push -u origin $current_branch"
     return 1
   fi
@@ -156,7 +167,7 @@ shippush() {
   git add -A
 
   if git diff --cached --quiet; then
-    echo "No staged changes to commit. Nothing pushed or deployed."
+    echo "No staged changes to commit. Nothing pushed."
     return 0
   fi
 
@@ -252,7 +263,11 @@ Git deploy workflow — available commands
 Configured for:
 EOF
   echo "  Repo:        $SHIP_REPO"
-  echo "  SSH host:    $SHIP_SSH_HOST"
-  echo "  Server path: $SHIP_SERVER_PATH"
+  if [ -n "$SHIP_SSH_HOST" ]; then
+    echo "  SSH host:    $SHIP_SSH_HOST"
+    echo "  Server path: $SHIP_SERVER_PATH"
+  else
+    echo "  Deploy:      (no server configured — shippush is commit + push only)"
+  fi
   echo "  Zip output:  $SHIP_ZIP_OUTPUT"
 }

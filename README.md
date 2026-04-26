@@ -28,6 +28,8 @@ This workflow is for the middle ground: a project you actually own end-to-end, w
 
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Modes](#modes)
+- [Safety and idempotence](#safety-and-idempotence)
 - [What you get](#what-you-get)
 - [What the bootstrap does](#what-the-bootstrap-does)
 - [Manual setup](#manual-setup)
@@ -59,11 +61,11 @@ bash bootstrap-deploy.sh
 
 The bootstrap will ask:
 
+- **Whether you have a remote server to deploy to.** If you say no, the script switches to no-server mode (see below) and skips every server-related question.
 - A human-readable project name (e.g. *My Acme Plugin*).
 - A short command prefix (e.g. `acme` → gives you `acmepull`, `acmepush`, etc.).
 - Local clone path of your project.
-- Server-side path to the project.
-- Production server SSH details (hostname, user, port).
+- *(Server mode only)* server-side path, SSH host details (hostname, user, port).
 - Where to put the SSH keys.
 
 Then it generates the keys, patches `~/.ssh/config`, writes a customized workflow file to `~/.{prefix}-workflow.zsh`, and adds a single source line to your `~/.zshrc`. Reload your shell and you have new commands:
@@ -78,6 +80,28 @@ Use `--dry-run` to see every planned change first:
 ```sh
 bash bootstrap-deploy.sh --dry-run
 ```
+
+## Modes
+
+The bootstrap has two modes, chosen by its first question:
+
+**Server mode** (the default — answer Y to "Do you have a remote server?"):
+The full edit → commit → push → deploy loop. Two SSH keys are generated, the SSH config gets both `Host github.com` and `Host <your-alias>` blocks, and `<prefix>push` SSHes into the server after pushing to GitHub.
+
+**No-server mode** (answer N):
+Just the git aliases — `<prefix>pull`, `<prefix>push`, `<prefix>branch`, `<prefix>revert`, `<prefix>status`, `<prefix>zip`. Useful for private repos, libraries, research code, or anything you don't deploy. `<prefix>push` becomes "stage everything, commit, push to GitHub" — the deploy step is skipped automatically because the configured server host is empty. Only one SSH key (for GitHub) is generated.
+
+**Switching later.** If you start in no-server mode and add a server later — or vice versa — re-run the bootstrap with the same prefix and pick *replace* when it detects the existing setup. Your config is regenerated cleanly.
+
+## Safety and idempotence
+
+The bootstrap is designed to be safe to re-run.
+
+- **Conflict detection.** Before doing anything, it checks `~/.zshrc`, `~/.ssh/config`, and `~/.{prefix}-workflow.zsh` for existing entries with the prefix you chose. If anything is found, it prints a list and asks whether to *replace* or *abort*.
+- **Existing github.com config.** If your `~/.ssh/config` already has a user-managed `Host github.com` block (outside any of our marker blocks), the bootstrap detects it and asks before adding our own. Defaults to "skip" so you don't end up with duplicate blocks.
+- **Backups before mutation.** Both `~/.zshrc` and `~/.ssh/config` are copied to timestamped `.bak.YYYYMMDD-HHMMSS` files before any change.
+- **SSH keys are never overwritten.** If a key already exists at the requested path, the bootstrap leaves it alone and tells you. Delete it first if you want a fresh one.
+- **Marker blocks per prefix.** Multiple projects can coexist — bootstrapping `acme` then `widgetco` doesn't touch each other's blocks.
 
 ## What you get
 
