@@ -1,0 +1,18 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor / IDE local settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backups the bootstrap might leave alongside the repo (it normally
+# writes them next to ~/.zshrc / ~/.ssh/config, but be defensive)
+*.bak
+*.bak.*
+
+# Local testing artifacts
+/tmp/
+*.log
