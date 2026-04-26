@@ -87,19 +87,50 @@ _gdw_branch() {
 }
 
 
-# SSH into the server and run `git pull --ff-only`.
-# No-op (with friendly message) if no server is configured.
+# SSH into the server and deploy the current GitHub repo.
+# If the server path does not exist yet, create the parent directory and clone.
+# If the server path exists and is already a Git repo, pull --ff-only.
+# If the server path exists but is not a Git repo, stop safely.
+# No-op if no server is configured.
 _gdw_deploy() {
   if [ -z "$GDW_SSH_HOST" ] || [ -z "$GDW_SERVER_PATH" ]; then
     return 0
   fi
-
+  local remote_url
+  remote_url="$(git config --get remote.origin.url)"
+  if [ -z "$remote_url" ]; then
+    _gdw_err "Deployment failed. No origin remote found in local repo."
+    return 1
+  fi
   echo "Deploying to server..."
-
-  if ssh "$GDW_SSH_HOST" "cd $GDW_SERVER_PATH && git pull --ff-only"; then
+  if ssh "$GDW_SSH_HOST" "
+    set -e
+    server_path='$GDW_SERVER_PATH'
+    remote_url='$remote_url'
+    if [ ! -d \"\$server_path\" ]; then
+      echo \"Server path does not exist. Creating parent directory and cloning...\"
+      mkdir -p \"\$(dirname \"\$server_path\")\"
+      git clone \"\$remote_url\" \"\$server_path\"
+      cd \"\$server_path\"
+      git checkout main
+      echo \"Initial server checkout complete.\"
+      exit 0
+    fi
+    if [ ! -d \"\$server_path/.git\" ]; then
+      echo \"Server path exists but is not a Git repo:\"
+      echo \"  \$server_path\"
+      echo \"Refusing to overwrite it automatically.\"
+      echo \"Move it aside manually, then rerun deploy.\"
+      exit 1
+    fi
+    cd \"\$server_path\"
+    git fetch origin
+    git checkout main
+    git pull --ff-only
+  "; then
     _gdw_ok "Deployment successful."
   else
-    _gdw_err "Deployment failed. Check server connection or Git status."
+    _gdw_err "Deployment failed. Check server path, Git status, or deploy key access."
     return 1
   fi
 }
