@@ -368,6 +368,7 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
 fi
 
 REPO_PUSHED=0
+REPO_CREATED=0
 if [ "$HAS_GH" -eq 1 ]; then
   info "  GitHub CLI (gh) detected and authenticated."
   if confirm "  Create the repo on GitHub now (and push)?"; then
@@ -375,9 +376,33 @@ if [ "$HAS_GH" -eq 1 ]; then
       public)  vis_flag="--public" ;;
       *)       vis_flag="--private" ;;
     esac
-    if gh repo create "${GH_USER}/${GH_REPO}" $vis_flag --source=. --push --description "$PROJECT_DESC"; then
-      ok "  Repo created and pushed (origin added by gh)."
-      REPO_PUSHED=1
+
+    # Split into two steps. `gh repo create --source=. --push` combines
+    # repo creation and push, but GitHub sometimes needs a beat after
+    # creation before SSH access works — without a pause the push can
+    # fail with "Repository not found" even though the repo exists.
+    if gh repo create "${GH_USER}/${GH_REPO}" $vis_flag --source=. --description "$PROJECT_DESC" >/dev/null 2>&1; then
+      ok "  Repo created on GitHub: https://github.com/${GH_USER}/${GH_REPO}"
+      REPO_CREATED=1
+
+      # Brief pause so SSH access has time to propagate, then push.
+      # Retry once on the off chance the first attempt is too eager.
+      sleep 2
+      if git push -u origin main >/dev/null 2>&1; then
+        ok "  Pushed initial commit on main."
+        REPO_PUSHED=1
+      else
+        sleep 3
+        if git push -u origin main >/dev/null 2>&1; then
+          ok "  Pushed initial commit on main (after retry)."
+          REPO_PUSHED=1
+        else
+          warn "  Repo was created but the push failed twice."
+          warn "  This is usually GitHub's SSH propagation lag — wait 5-10 seconds and run:"
+          echo "    git push -u origin main"
+          REPO_PUSHED=1   # treat as success — the repo exists, just needs a retry
+        fi
+      fi
     else
       warn "  gh repo create failed — finish manually below."
     fi
@@ -385,12 +410,24 @@ if [ "$HAS_GH" -eq 1 ]; then
 fi
 
 if [ "$REPO_PUSHED" -eq 0 ]; then
-  # Fallback: add origin ourselves so the user's manual `git push -u
-  # origin main` step works without an extra command.
-  git remote add origin "$REMOTE_URL"
-  ok "  origin -> $REMOTE_URL"
+  # Manual fallback path. Check for existing origin (gh may have added
+  # it before failing) before trying to add our own.
+  if git remote get-url origin >/dev/null 2>&1; then
+    info "  origin remote already exists — leaving as-is."
+  else
+    git remote add origin "$REMOTE_URL"
+    ok "  origin -> $REMOTE_URL"
+  fi
+
   echo
-  cat <<EOF
+  if [ "$REPO_CREATED" -eq 1 ]; then
+    cat <<EOF
+  The GitHub repo exists; only the initial push needs to be retried:
+
+    git push -u origin main
+EOF
+  else
+    cat <<EOF
   Manual GitHub steps:
 
     1) Open  https://github.com/new
@@ -405,6 +442,7 @@ if [ "$REPO_PUSHED" -eq 0 ]; then
   Or install the GitHub CLI to skip this step next time:
     brew install gh && gh auth login
 EOF
+  fi
 fi
 
 
