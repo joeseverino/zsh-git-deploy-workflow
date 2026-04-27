@@ -15,12 +15,17 @@
 GDW_LIB_PATH="${GDW_LIB_PATH:-$HOME/.git-deploy-lib.zsh}"
 
 # Source the shared library if it isn't already loaded in this shell.
+#
+# Fallback path uses ${(%):-%N} (the Zsh prompt-expansion form for the
+# current script's name) instead of $0. In sourced files, $0 is the
+# parent shell's $0, not the file path you'd expect — %N reliably
+# expands to the sourced file even when called from .zshrc.
 if ! typeset -f _gdw_pull >/dev/null 2>&1; then
   if [ -f "$GDW_LIB_PATH" ]; then
     source "$GDW_LIB_PATH"
   else
-    # Fall back to a sibling file if running directly from the repo.
-    source "${0:A:h}/git-deploy-lib.zsh"
+    GDW_WORKFLOW_DIR="${${(%):-%N}:A:h}"
+    source "$GDW_WORKFLOW_DIR/git-deploy-lib.zsh"
   fi
 fi
 

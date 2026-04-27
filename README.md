@@ -144,7 +144,7 @@ In order, on your laptop:
 3. **Renders the workflow template** — runs `git-deploy-workflow.zsh` through `sed` + `awk` to substitute your prefix everywhere (`shippull` → `acmepull`, `SHIP_*` → `ACME_*`, etc.) and bake in your paths.
 4. **Patches `~/.zshrc`** — adds a single `source` line, also wrapped in marker lines.
 5. **Backs up everything** — both `~/.zshrc` and `~/.ssh/config` get timestamped `.bak.YYYYMMDD-HHMMSS` copies before any modification.
-6. **Offers to set up the server-side deploy key for you** — at the end of the install, the bootstrap can SSH into your server, run `ssh-keygen` (with passphrase prompt), display the resulting public key for you to paste into the repo's Deploy Keys page on GitHub, and test the SSH connection back to GitHub from the server. You can also skip this and copy/paste the printed manual commands instead.
+6. **Offers to set up the server-side deploy key for you** — at the end of the install, the bootstrap can SSH into your server, generate a deploy key (no passphrase — required so deploys run non-interactively), attempt to register it with GitHub automatically via the GitHub CLI, fall back to a manual paste walkthrough if the CLI isn't available or lacks permission, and test the SSH connection back to GitHub from the server. You can skip this and copy/paste the printed manual commands instead.
 7. **Prints next steps** — exactly what you still have to do off-machine: paste your GitHub pubkey to GitHub Settings, paste the server's deploy pubkey to the repo's Deploy Keys page, clone the repo on the server.
 
 ## Manual setup
@@ -253,7 +253,7 @@ This tool generates and manages SSH keys, so it's worth being explicit about wha
 
 - **Separate keys per concern.** GitHub and the server get different keys. If one leaks, the other side is unaffected.
 - **`IdentitiesOnly yes`** in every Host block. SSH offers only the explicitly assigned key, never every key in your agent — important if you have many keys.
-- **`AddKeysToAgent yes` + `UseKeychain yes`** on macOS. Passphrases are cached in the macOS Keychain, not typed for every command.
+- **`AddKeysToAgent yes` + `UseKeychain yes`** on macOS (Linux uses `AddKeysToAgent yes` only — `UseKeychain` is a macOS-only directive). Passphrases are cached in the macOS Keychain, not typed for every command.
 - **Read-only deploy key on the server.** The bootstrap walks you through this in step 3 of its "next steps" output. The server's GitHub key is registered as a read-only Deploy Key on the repo, so the server can `git pull` updates but cannot push back.
 - **No network calls during bootstrap.** Everything happens on your laptop; no telemetry, no remote config fetching.
 - **Backups before mutations.** Both `~/.zshrc` and `~/.ssh/config` are copied to timestamped `.bak.*` files before being modified.
@@ -264,7 +264,7 @@ This tool generates and manages SSH keys, so it's worth being explicit about wha
 You have uncommitted edits. Either commit them with `<prefix>push "..."`, move them onto a branch with `<prefix>branch ...`, or discard them with `git restore .` and `git clean -fd`.
 
 **`deploy-<prefix>` fails with permission denied**
-The server's SSH user can't reach your GitHub deploy key, or the deploy key doesn't have access to the repo. Re-test with `ssh <your-alias> "ssh -T git@github.com"` — it should report a successful GitHub authentication on the server side.
+The server's SSH user can't reach your GitHub deploy key, or the deploy key doesn't have access to the repo. Re-test with `ssh <your-alias> "ssh -T git@github-<prefix>"` (using the alias you configured) — it should report a successful GitHub authentication on the server side.
 
 **Server pull fails with merge conflicts**
 The server has uncommitted local changes (often from someone editing files via SFTP). SSH in and resolve manually:

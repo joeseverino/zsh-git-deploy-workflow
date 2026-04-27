@@ -29,8 +29,10 @@
 #      repo-specific read-only GitHub deploy key.
 #
 # What this does NOT do
-#   - Register SSH keys with GitHub automatically.
-#   - Add deploy keys to a GitHub repo automatically.
+#   - Register your personal GitHub SSH key automatically (you paste
+#     ~/.ssh/<prefix>_github.pub into github.com/settings/keys yourself).
+#   - Require GitHub CLI; if gh is unavailable or lacks the right scope,
+#     it falls back to a manual deploy-key paste flow.
 #   - Replace existing user-managed SSH config blocks.
 #
 # Tested on macOS (bash 3.2 / 5.x) and Linux (bash 4.x+). No external
@@ -331,13 +333,30 @@ generate_key() {
 # SSH config block builders
 # ---------------------------------------------------------------------
 
+# SSH agent / keychain lines that vary by platform.
+#
+# `UseKeychain yes` is a macOS-only directive that integrates with the
+# system Keychain. Linux's OpenSSH rejects it as an unknown option, so
+# we only emit it on Darwin.
+ssh_keychain_lines() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    cat <<'EOF'
+  AddKeysToAgent yes
+  UseKeychain yes
+EOF
+  else
+    cat <<'EOF'
+  AddKeysToAgent yes
+EOF
+  fi
+}
+
 build_github_block() {
   local github_host="$1" github_key="$2"
   cat <<EOF
 Host $github_host
   User git
-  AddKeysToAgent yes
-  UseKeychain yes
+$(ssh_keychain_lines)
   IdentityFile $github_key
   IdentitiesOnly yes
 EOF
@@ -352,8 +371,7 @@ Host $ssh_host
   Port $port
   IdentityFile $server_key
   IdentitiesOnly yes
-  AddKeysToAgent yes
-  UseKeychain yes
+$(ssh_keychain_lines)
 EOF
 }
 
@@ -397,13 +415,16 @@ check_existing_setup() {
 #
 # Steps performed remotely (each safe to re-run):
 #   1. Ensure ~/.ssh exists with mode 700.
-#   2. Generate ~/.ssh/<prefix>_github_deploy with a passphrase prompt
-#      (skipped if the key already exists).
-#   3. Append a marker-bracketed `Host <SERVER_GITHUB_ALIAS>` block to
-#      ~/.ssh/config pointing at the new key (skipped if the marker is
-#      already there).
+#   2. Generate ~/.ssh/<prefix>_github_deploy WITHOUT a passphrase
+#      (industry standard for read-only deploy keys; lets the deploy
+#      run non-interactively). Skipped if the key already exists.
+#   3. (Re)write a marker-bracketed `Host <SERVER_GITHUB_ALIAS>` block
+#      in ~/.ssh/config pointing at the key. Strip-and-rewrite means
+#      fixes from updated bootstrap runs propagate.
 #   4. Tighten permissions on the key files and ssh config.
-#   5. Print the public key for manual paste into GitHub Deploy Keys.
+#   5. Try to add the deploy key to GitHub via `gh repo deploy-key add`
+#      if the GitHub CLI is available; fall back to a manual paste
+#      walkthrough otherwise.
 #   6. Optionally test the alias with `ssh -T git@<alias>`.
 #
 # Reads from install-flow scope: $SSH_HOST, $PROJECT_PREFIX,
@@ -507,7 +528,15 @@ EOF
 
     if [ -n "$repo_path" ] && printf '%s' "$repo_path" | grep -qE '^[^/]+/[^/]+$'; then
       info "  → GitHub CLI detected. Attempting to add the deploy key directly to '$repo_path'..."
-      if printf '%s\n' "$pubkey" | gh repo deploy-key add - \
+
+      # Write the key to a temp file. Some `gh` versions are picky about
+      # `-` (stdin) for repo deploy-key add; a real file path is the
+      # most portable option.
+      local tmp_key
+      tmp_key="$(mktemp -t gdw-pubkey.XXXXXX)"
+      printf '%s\n' "$pubkey" > "$tmp_key"
+
+      if gh repo deploy-key add "$tmp_key" \
         --title "$PROJECT_LABEL deploy" \
         --repo "$repo_path" 2>&1 | sed 's/^/    /'; then
         ok "  ✓ Deploy key added to $repo_path (read-only)."
@@ -517,6 +546,8 @@ EOF
         warn "  (Common cause: your gh token doesn't have admin:repo_hook scope."
         warn "   Run 'gh auth refresh -s admin:repo_hook' to grant it.)"
       fi
+
+      rm -f "$tmp_key"
     else
       warn "  Couldn't parse owner/repo from $SERVER_REMOTE — falling back to manual paste."
     fi
@@ -807,15 +838,21 @@ EOF
     SERVER_GITHUB_ALIAS="$(ask 'Server-side GitHub host alias' "github-${PROJECT_PREFIX}")"
 
     # Try to derive the server remote URL from the local repo's origin.
+    # Handle both SSH and HTTPS origin URLs:
+    #   git@github.com:user/repo.git       -> git@<alias>:user/repo.git
+    #   https://github.com/user/repo.git   -> git@<alias>:user/repo.git
     local local_origin=""
     if [ -d "$REPO_PATH/.git" ]; then
       local_origin="$(cd "$REPO_PATH" && git config --get remote.origin.url 2>/dev/null || true)"
     fi
     local server_remote_default=""
     if [ -n "$local_origin" ]; then
-      # Swap github.com for the alias to produce e.g.
-      #   git@github.com:user/repo.git  ->  git@github-theme:user/repo.git
-      server_remote_default="$(printf '%s' "$local_origin" | sed "s|@github\.com:|@${SERVER_GITHUB_ALIAS}:|")"
+      if printf '%s' "$local_origin" | grep -qE '^git@github\.com:'; then
+        server_remote_default="$(printf '%s' "$local_origin" | sed "s|@github\.com:|@${SERVER_GITHUB_ALIAS}:|")"
+      elif printf '%s' "$local_origin" | grep -qE '^https://github\.com/'; then
+        local repo_part="${local_origin#https://github.com/}"
+        server_remote_default="git@${SERVER_GITHUB_ALIAS}:${repo_part}"
+      fi
     fi
     if [ -z "$server_remote_default" ]; then
       server_remote_default="git@${SERVER_GITHUB_ALIAS}:<you>/<repo>.git"
@@ -878,7 +915,7 @@ EOF
   install_shared_lib
 
   section "Checking SSH keys"
-  info "  Existing keys are reused. Missing keys will be created with a passphrase prompt."
+  info "  Existing local SSH keys are reused. Missing local keys will be created interactively."
   generate_key "$GITHUB_KEY" "${PROJECT_LABEL} — github"
   if [ "$HAS_SERVER" -eq 1 ]; then
     generate_key "$SERVER_KEY" "${PROJECT_LABEL} — server ssh"
@@ -960,24 +997,21 @@ EOF
 
   Optional server-side ~/.ssh/config snippet:
 
-       Host github.com
-         User git
-         IdentityFile ~/.ssh/${PROJECT_PREFIX}_github_deploy
-         IdentitiesOnly yes
-
-  If the server already has a Host github.com block for another repo,
-  use a unique alias instead so each repo can carry its own deploy key:
-
        Host github-${PROJECT_PREFIX}
          HostName github.com
          User git
          IdentityFile ~/.ssh/${PROJECT_PREFIX}_github_deploy
          IdentitiesOnly yes
 
-  Then clone with: git clone git\@github-${PROJECT_PREFIX}:you/your-repo.git
+  Then clone with:
+       git clone git\@github-${PROJECT_PREFIX}:you/your-repo.git
+
+  Only use Host github.com if this server has exactly one repo/deploy key.
+  For multiple repos, use a unique alias per repo (as shown above) so each
+  can carry its own deploy key without interfering with the others.
 
   Test from the server:
-       ssh -T git@github.com         # or your alias
+       ssh -T git\@github-${PROJECT_PREFIX}
 
   Clone or initialize the repo at:
        $SERVER_PATH

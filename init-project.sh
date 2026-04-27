@@ -400,7 +400,9 @@ if [ "$HAS_GH" -eq 1 ]; then
           warn "  Repo was created but the push failed twice."
           warn "  This is usually GitHub's SSH propagation lag — wait 5-10 seconds and run:"
           echo "    git push -u origin main"
-          REPO_PUSHED=1   # treat as success — the repo exists, just needs a retry
+          # Leave REPO_PUSHED=0 so the final summary honestly says "not pushed"
+          # and the user can see they need to retry. The repo + remote exist.
+          REPO_PUSHED=0
         fi
       fi
     else
