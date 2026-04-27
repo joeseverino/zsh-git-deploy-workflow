@@ -1,41 +1,42 @@
 # zsh-git-deploy-workflow
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Shell: bash + zsh](https://img.shields.io/badge/shell-bash%20%2B%20zsh-89e051.svg)](#requirements)
-[![No dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-success.svg)](#requirements)
+A small, opinionated **edit → commit → push → deploy** workflow for projects that live in a Git repo on your laptop and, optionally, a Git checkout on a server you SSH into.
 
-A small, opinionated **edit → commit → push → deploy** workflow for any project that lives in a Git repo on your laptop and a Git checkout on a server you SSH into. One bootstrap command sets up the SSH keys, the SSH config, and a clean set of zsh aliases, and you're done.
+One bootstrap command sets up project-specific zsh commands, SSH keys, SSH config entries, a shared deploy library, and a repeatable push/deploy flow.
 
 ```sh
-acmepush "fix: tighten the cache headers"
-#  ↑   commits everything, pushes to GitHub, then SSHes into the
-#      server and runs `git pull --ff-only` — all in one command.
+acmepush "fix: tighten cache headers"
+# commits everything, pushes to GitHub, then optionally SSHes into the
+# server and runs git pull --ff-only
 ```
 
-**This is not a CI service.** No webhook, no YAML pipeline, no third-party dashboard. It's ~250 lines of zsh that wraps `git`, `ssh`, and a bit of safety logic — the entire deploy story stays in your shell and your SSH config.
+This is not a CI service. No webhook, no YAML pipeline, no third-party dashboard. It wraps `git`, `ssh`, `ssh-keygen`, and shell scripts so the deploy story stays readable, local, and easy to audit.
 
 ## Why bother
 
-Every "how do I deploy a WordPress plugin / a Django app / a static site" tutorial assumes one of three things:
+Many small projects do not need a full deployment pipeline, but they still deserve something better than manual file edits.
 
-- **SFTP** — no version history; rollback means restoring a backup and remembering exactly which files you edited.
-- **The platform's upload form** — overwrites everything blindly, doesn't preserve runtime data.
-- **Push-to-deploy CI** — great when the project's big enough to justify it, overkill when "deploy" is fundamentally `git pull` on a server.
+Common options usually fall into one of these buckets:
 
-This workflow is for the middle ground: a project you actually own end-to-end, where the server is one SSH hop away, and you want the simplicity of `acmepush "fix typo"` without the ceremony of a pipeline.
+- **SFTP** — no clean version history; rollback depends on backups and memory.
+- **Platform upload forms** — easy to overwrite files blindly and mix code with runtime data.
+- **Push-to-deploy CI** — powerful, but often too much ceremony for a small project whose deploy step is really just `git pull` on a server.
+
+This workflow is for the middle ground: projects you own end-to-end, where a simple Git-based release path is enough, but you still want safety checks, repeatability, key separation, and clean commands.
 
 ## Table of Contents
 
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Modes](#modes)
-- [Safety and idempotence](#safety-and-idempotence)
-- [Architecture](#architecture)
 - [What you get](#what-you-get)
-- [What the bootstrap does](#what-the-bootstrap-does)
-- [Manual setup](#manual-setup)
 - [Daily use](#daily-use)
+- [Safety and idempotence](#safety-and-idempotence)
+- [What the bootstrap does](#what-the-bootstrap-does)
+- [New-project scaffolding](#new-project-scaffolding)
+- [Architecture](#architecture)
 - [Multiple projects](#multiple-projects)
+- [Manual setup](#manual-setup)
 - [Uninstalling](#uninstalling)
 - [Project structure](#project-structure)
 - [Security model](#security-model)
@@ -44,19 +45,223 @@ This workflow is for the middle ground: a project you actually own end-to-end, w
 
 ## Requirements
 
-- macOS or Linux with **zsh** as your interactive shell (default on macOS Catalina+).
-- **bash 3.2+** for the bootstrap script (default on macOS, present on every Linux).
-- `git`, `ssh`, `ssh-keygen`, `awk`, `sed` — all standard.
-- A GitHub repo for your project.
-- A server you can SSH into where the project lives in a Git checkout.
+Required:
 
-No language runtime, package manager, or dependency installation required.
+- macOS or Linux.
+- **zsh** as your interactive shell.
+- **bash 3.2+** for the bootstrap scripts.
+- `git`, `ssh`, `ssh-keygen`, `awk`, `sed`, `mktemp`, and standard shell tools.
+- A GitHub repository for the project.
+- For server mode: a server you can SSH into where the project should live as a Git checkout.
+
+Optional:
+
+- GitHub CLI (`gh`) for automatic repo creation and deploy-key registration.
+- Without `gh`, the scripts print the manual GitHub steps instead.
+
+No language runtime, package manager, or application framework is required.
 
 ## Quick start
 
-### Brand-new project (zero to first commit + deploy in one go)
+### 1. Clone this workflow repo
 
-If you're starting from scratch — no repo, no GitHub, nothing — use the scaffolder:
+```sh
+git clone git@github.com:joeseverino/zsh-git-deploy-workflow.git
+cd zsh-git-deploy-workflow
+```
+
+### 2. Bootstrap an existing project
+
+From the project you want to wire up:
+
+```sh
+cd ~/path/to/your-project
+bash ~/path/to/zsh-git-deploy-workflow/bootstrap-deploy.sh
+```
+
+The bootstrap asks for:
+
+- Whether this project deploys to a remote server.
+- A command prefix, such as `acme`.
+- The local project path.
+- The local ZIP output path.
+- GitHub SSH key details.
+- In server mode: server SSH details, server project path, server-side GitHub alias, and server-side remote URL.
+
+After the bootstrap finishes:
+
+```sh
+exec zsh
+acmehelp
+```
+
+### 3. Preview first with dry run
+
+```sh
+bash ~/path/to/zsh-git-deploy-workflow/bootstrap-deploy.sh --dry-run
+```
+
+Dry run prints the plan and writes nothing.
+
+## Modes
+
+The bootstrap supports two modes.
+
+### Server mode
+
+Use this for projects that deploy to a remote server, such as:
+
+- WordPress plugins
+- WordPress themes
+- Static sites
+- Small apps hosted on a VPS or shared host
+- Any project where deploy means "SSH into the server and pull latest main"
+
+In server mode, `<prefix>push "message"` does this:
+
+1. Confirms the local repo is on `main`.
+2. Stages all changes.
+3. Stops cleanly if there is nothing to commit.
+4. Shows the pending Git status.
+5. Creates the commit.
+6. Pushes to GitHub.
+7. SSHes into the server.
+8. Runs a fast-forward-only pull inside the configured server path.
+
+If the server path does not exist yet, the deploy command can create the parent directory and clone the repo into place. If the path exists but is not a Git repo, it refuses to overwrite it.
+
+### No-server mode
+
+Use this for projects that do not deploy anywhere yet, such as:
+
+- Libraries
+- Scripts
+- Research code
+- Private GitHub repos
+- Early-stage projects
+
+In no-server mode, `<prefix>push "message"` stages, commits, and pushes to GitHub. The deploy step is skipped automatically because no server host is configured.
+
+If you add a server later, rerun the bootstrap with the same prefix and choose `replace`.
+
+## What you get
+
+After bootstrap, your shell gets project-specific commands using the prefix you chose.
+
+For prefix `acme`:
+
+| Command | What it does |
+| --- | --- |
+| `acmepull` | Pulls latest `main` from GitHub. Refuses if local edits exist. |
+| `acmepush "message"` | Stages all changes, commits, pushes to GitHub, and deploys if a server is configured. Only runs from `main`. |
+| `acmebranch <name>` | Creates a new branch from the current state. |
+| `acmerevert` | Reverts the latest `main` commit after explicit `YES` confirmation, pushes the revert, and redeploys if configured. |
+| `acmestatus` | Shows short Git status and the current branch. |
+| `acmezip` | Builds a clean ZIP from the current Git commit using `git archive`. |
+| `deploy-acme` | Runs only the deploy step. In no-server mode, it reports that no deploy is configured. |
+| `acmehelp` | Shows the command list and configured paths for the project. |
+| `gdw-list` | Lists every bootstrapped project found in `~/.zshrc`. |
+
+## Daily use
+
+Start clean:
+
+```sh
+acmepull
+```
+
+Make changes, then commit, push, and deploy:
+
+```sh
+acmepush "fix: stop double-encoding URLs"
+```
+
+Check status:
+
+```sh
+acmestatus
+```
+
+Create a branch for work that should not deploy immediately:
+
+```sh
+acmebranch refactor/cache-helpers
+git push -u origin refactor/cache-helpers
+```
+
+Build a clean review ZIP:
+
+```sh
+acmezip
+```
+
+Revert the latest `main` commit and redeploy:
+
+```sh
+acmerevert
+```
+
+## Safety and idempotence
+
+The bootstrap is designed to be safe to rerun.
+
+- **Dry run support.** Use `--dry-run` to preview changes before writing anything.
+- **Prefix conflict detection.** If the chosen prefix already exists, the bootstrap asks whether to replace the previous setup or abort.
+- **Backups before mutation.** `~/.zshrc` and `~/.ssh/config` are copied to timestamped `.bak.YYYYMMDD-HHMMSS` files before modification.
+- **Marker blocks.** All generated shell and SSH config blocks are wrapped in prefix-specific marker comments.
+- **Existing SSH config reuse.** If a matching `Host` block already exists, the bootstrap reuses it instead of duplicating it.
+- **SSH keys are not overwritten.** Existing keys at the selected paths are reused.
+- **Main-branch guard.** `<prefix>push` and `<prefix>revert` only run from `main`.
+- **Dirty-tree guard.** Pull and revert commands refuse to continue if local changes or untracked files are present.
+- **Fast-forward-only deploy.** Server deploys use `git pull --ff-only`, preventing silent merge commits on the server.
+- **Server overwrite guard.** If the server path exists but is not a Git repo, deploy refuses to touch it.
+
+## What the bootstrap does
+
+On your laptop, `bootstrap-deploy.sh`:
+
+1. Prompts for project mode, prefix, local repo path, ZIP output path, and SSH details.
+2. Installs the shared library at:
+
+   ```sh
+   ~/.git-deploy-lib.zsh
+   ```
+
+3. Renders a small per-project workflow file at:
+
+   ```sh
+   ~/.<prefix>-workflow.zsh
+   ```
+
+4. Adds one source block to `~/.zshrc`.
+5. Reuses or creates the selected local GitHub SSH key.
+6. In server mode, reuses or creates the selected server SSH key.
+7. Adds SSH config blocks only when needed.
+8. In server mode, asks whether to set up the server-side deploy key and GitHub alias.
+9. Adds a `gdw-bootstrap` convenience alias on first run.
+10. Prints next steps.
+
+In server mode, the optional server-side setup can:
+
+1. SSH into the server.
+2. Generate a repo-specific deploy key without a passphrase.
+3. Add a server-side SSH alias such as:
+
+   ```sshconfig
+   Host github-acme
+     HostName github.com
+     User git
+     IdentityFile ~/.ssh/acme_github_deploy
+     IdentitiesOnly yes
+   ```
+
+4. Attempt to register the deploy key with GitHub using `gh repo deploy-key add`.
+5. Fall back to a manual paste flow if GitHub CLI is unavailable or lacks permission.
+6. Test the server's GitHub authentication through the alias.
+
+## New-project scaffolding
+
+`init-project.sh` creates a new project from an empty or new directory.
 
 ```sh
 mkdir my-new-thing
@@ -64,156 +269,43 @@ cd my-new-thing
 bash ~/path/to/zsh-git-deploy-workflow/init-project.sh
 ```
 
-It prompts for project name / type / license / GitHub handle, generates a sensible `.gitignore` (WordPress plugin, WordPress theme, Node.js, Python, or generic), README.md, and LICENSE, runs `git init` + `git commit`, sets the remote, and either runs `gh repo create` (if you have the GitHub CLI) or prints the manual `git push` commands. At the end it offers to chain into the deploy bootstrap so you go from empty folder to live deploy without breaking flow.
+It does the following:
 
-### Existing project (just wire up the deploy)
+1. Uses the current directory name as the project name and GitHub repo name.
+2. Prompts for a one-line description.
+3. Detects your GitHub username from `gh` or global Git config when possible.
+4. Writes a starter `.gitignore`.
+5. Writes a starter `README.md`.
+6. Creates a `LICENSE` file when selected.
+7. Runs `git init -b main`.
+8. Stages the files and makes the initial commit.
+9. Creates and pushes the GitHub repo with `gh` when available.
+10. Falls back to manual GitHub instructions when `gh` is unavailable.
+11. Adds a `gdw-init` convenience alias on first run.
+12. Offers to chain directly into `bootstrap-deploy.sh`.
 
-```sh
-git clone git@github.com:joeseverino/zsh-git-deploy-workflow.git
-cd zsh-git-deploy-workflow
-bash bootstrap-deploy.sh
-```
-
-The bootstrap will ask:
-
-- **Whether you have a remote server to deploy to.** If you say no, the script switches to no-server mode (see below) and skips every server-related question.
-- A human-readable project name (e.g. *My Acme Plugin*).
-- A short command prefix (e.g. `acme` → gives you `acmepull`, `acmepush`, etc.).
-- Local clone path of your project.
-- *(Server mode only)* server-side path, SSH host details (hostname, user, port).
-- Where to put the SSH keys.
-
-Then it generates the keys, patches `~/.ssh/config`, writes a customized workflow file to `~/.{prefix}-workflow.zsh`, and adds a single source line to your `~/.zshrc`. Reload your shell and you have new commands:
+Use dry run to preview:
 
 ```sh
-exec zsh
-acmehelp
+bash ~/path/to/zsh-git-deploy-workflow/init-project.sh --dry-run
 ```
-
-Use `--dry-run` to see every planned change first:
-
-```sh
-bash bootstrap-deploy.sh --dry-run
-```
-
-## Modes
-
-The bootstrap has two modes, chosen by its first question:
-
-**Server mode** (the default — answer Y to "Do you have a remote server?"):
-The full edit → commit → push → deploy loop. Two SSH keys are generated, the SSH config gets both `Host github.com` and `Host <your-alias>` blocks, and `<prefix>push` SSHes into the server after pushing to GitHub.
-
-**No-server mode** (answer N):
-Just the git aliases — `<prefix>pull`, `<prefix>push`, `<prefix>branch`, `<prefix>revert`, `<prefix>status`, `<prefix>zip`. Useful for private repos, libraries, research code, or anything you don't deploy. `<prefix>push` becomes "stage everything, commit, push to GitHub" — the deploy step is skipped automatically because the configured server host is empty. Only one SSH key (for GitHub) is generated.
-
-**Switching later.** If you start in no-server mode and add a server later — or vice versa — re-run the bootstrap with the same prefix and pick *replace* when it detects the existing setup. Your config is regenerated cleanly.
-
-## Safety and idempotence
-
-The bootstrap is designed to be safe to re-run.
-
-- **Conflict detection.** Before doing anything, it checks `~/.zshrc`, `~/.ssh/config`, and `~/.{prefix}-workflow.zsh` for existing entries with the prefix you chose. If anything is found, it prints a list and asks whether to *replace* or *abort*.
-- **Existing github.com config.** If your `~/.ssh/config` already has a user-managed `Host github.com` block (outside any of our marker blocks), the bootstrap detects it and asks before adding our own. Defaults to "skip" so you don't end up with duplicate blocks.
-- **Backups before mutation.** Both `~/.zshrc` and `~/.ssh/config` are copied to timestamped `.bak.YYYYMMDD-HHMMSS` files before any change.
-- **SSH keys are never overwritten.** If a key already exists at the requested path, the bootstrap leaves it alone and tells you. Delete it first if you want a fresh one.
-- **Marker blocks per prefix.** Multiple projects can coexist — bootstrapping `acme` then `widgetco` doesn't touch each other's blocks.
-
-## What you get
-
-After bootstrap, you'll have these zsh commands (with your prefix in place of `<prefix>`):
-
-| Command | What it does |
-| --- | --- |
-| `<prefix>pull` | Pull latest `main` from GitHub. Refuses if you have local edits. |
-| `<prefix>push "msg"` | Stage everything, commit, push to GitHub, then SSH into the server and `git pull`. **Only runs from `main`** — for branch work use plain `git`. |
-| `<prefix>branch <name>` | Create a new branch from your current state. |
-| `<prefix>revert` | Revert the latest `main` commit (with `YES` confirmation), push the revert, redeploy. |
-| `<prefix>status` | Quick `git status --short` + current branch. |
-| `<prefix>zip` | `git archive` the current commit to a clean zip — for review uploads or distribution. |
-| `deploy-<prefix>` | Just the deploy step alone (server-side `git pull`). |
-| `<prefix>help` | Print this list with your configured paths. |
-
-Every safety rail is built in: the dirty-tree check refuses to overwrite uncommitted work, `<prefix>push` only runs from `main`, `<prefix>revert` requires explicit `YES` confirmation, and every command exits non-zero on the first failed git/ssh call.
-
-## What the bootstrap does
-
-In order, on your laptop:
-
-1. **Generates two ed25519 SSH keys** — one for your GitHub account, one for the production server. Existing keys at the same path are skipped (not overwritten).
-2. **Patches `~/.ssh/config`** — adds a `Host github.com` block pointing at your GitHub key and a `Host <your-alias>` block for the server, both wrapped in marker lines so they're easy to remove later.
-3. **Renders the workflow template** — runs `git-deploy-workflow.zsh` through `sed` + `awk` to substitute your prefix everywhere (`shippull` → `acmepull`, `SHIP_*` → `ACME_*`, etc.) and bake in your paths.
-4. **Patches `~/.zshrc`** — adds a single `source` line, also wrapped in marker lines.
-5. **Backs up everything** — both `~/.zshrc` and `~/.ssh/config` get timestamped `.bak.YYYYMMDD-HHMMSS` copies before any modification.
-6. **Offers to set up the server-side deploy key for you** — at the end of the install, the bootstrap can SSH into your server, generate a deploy key (no passphrase — required so deploys run non-interactively), attempt to register it with GitHub automatically via the GitHub CLI, fall back to a manual paste walkthrough if the CLI isn't available or lacks permission, and test the SSH connection back to GitHub from the server. You can skip this and copy/paste the printed manual commands instead.
-7. **Prints next steps** — exactly what you still have to do off-machine: paste your GitHub pubkey to GitHub Settings, paste the server's deploy pubkey to the repo's Deploy Keys page, clone the repo on the server.
-
-## Manual setup
-
-Don't trust the bootstrap? Don't want to. Open `git-deploy-workflow.zsh`, edit the four `SHIP_*` variables at the top to match your project, and add this line to your `~/.zshrc`:
-
-```zsh
-source "$HOME/path/to/git-deploy-workflow.zsh"
-```
-
-You'll have `shippull`, `shippush`, etc. The bootstrap exists purely to handle the SSH key + config + prefix-customization steps; the workflow file itself is fully usable as-is.
-
-## Daily use
-
-```sh
-acmepull                                    # start clean from main
-# ... edit code ...
-acmepush "fix: stop double-encoding URLs"   # commit + push + deploy in one step
-```
-
-For non-deployable work — experiments, large refactors, anything that should be reviewed before going live:
-
-```sh
-acmepull
-acmebranch refactor/extract-cache-helpers
-# ... edit, commit, push to a branch via plain git ...
-git push -u origin refactor/extract-cache-helpers
-# ... open a PR, review, merge to main on GitHub ...
-acmepull && acmepush "merge: extract cache helpers"
-```
-
-If a deploy went wrong:
-
-```sh
-acmerevert     # asks for "YES" confirmation, then reverts the latest commit and redeploys
-```
-
-## Multiple projects
-
-Each bootstrap uses a unique marker block in `~/.zshrc` and `~/.ssh/config`, scoped to the prefix you chose. Run the bootstrap as many times as you have projects:
-
-```sh
-bash bootstrap-deploy.sh    # prefix: acme       → acmepush
-bash bootstrap-deploy.sh    # prefix: widgetco   → wcpush
-bash bootstrap-deploy.sh    # prefix: blog       → blogpush
-```
-
-Each gets its own workflow file, its own SSH keys, its own SSH config block, and its own source line. They don't collide.
-
-## Uninstalling
-
-```sh
-bash bootstrap-deploy.sh --uninstall
-```
-
-Asks which prefix to remove, then strips the corresponding marker blocks from `~/.zshrc` and `~/.ssh/config`. Leaves your SSH keys and the rendered workflow file in place — it tells you the exact `rm` commands if you want them gone too. Backups are made before any modification.
 
 ## Architecture
 
-The workflow uses a **shared library + thin per-project wrappers** pattern. After running the bootstrap for `acme` and `widgetco` and `theme`, your home directory looks like:
+The workflow uses a **shared library + thin per-project wrapper** pattern.
 
-```
-~/.git-deploy-lib.zsh      # ← shared logic, ~250 lines, installed once
-~/.acme-workflow.zsh       # ← ~50 lines: context + 8 wrappers
-~/.widgetco-workflow.zsh   # ← ~50 lines: context + 8 wrappers
-~/.theme-workflow.zsh      # ← ~50 lines: context + 8 wrappers
+After bootstrapping projects named `acme`, `widgetco`, and `theme`, your home directory looks like this:
+
+```text
+~/.git-deploy-lib.zsh      # shared logic, installed once
+~/.acme-workflow.zsh       # project context + wrappers
+~/.widgetco-workflow.zsh   # project context + wrappers
+~/.theme-workflow.zsh      # project context + wrappers
 ```
 
-The library defines generic functions (`_gdw_pull`, `_gdw_push`, etc.) that read their config from environment variables (`GDW_REPO`, `GDW_SSH_HOST`, …). Each per-project file is just a context-setter plus eight one-liner wrappers:
+The shared library defines generic functions such as `_gdw_pull`, `_gdw_push`, `_gdw_revert`, `_gdw_zip`, and `_gdw_deploy`. Each per-project workflow file sets context variables and exposes friendly commands.
+
+Example wrapper structure:
 
 ```zsh
 _acme_ctx() {
@@ -225,67 +317,184 @@ _acme_ctx() {
   GDW_ZIP_OUTPUT="$HOME/Downloads/acme-review.zip"
 }
 
-acmepull()    { _acme_ctx; _gdw_pull "$@"; }
-acmepush()    { _acme_ctx; _gdw_push "$@"; }
-# ...etc.
+acmepull() { _acme_ctx; _gdw_pull "$@"; }
+acmepush() { _acme_ctx; _gdw_push "$@"; }
 ```
 
-The bootstrap installs/updates the shared library every run, so library improvements ship to every project on the next bootstrap. If you want to fix a bug in `_gdw_push`, you fix it once in `git-deploy-lib.zsh` and re-run the bootstrap.
+The bootstrap installs or updates the shared library on each run. That means improvements to `git-deploy-lib.zsh` can be applied across bootstrapped projects by rerunning the bootstrap.
+
+## Multiple projects
+
+Each project uses its own prefix, workflow file, SSH config markers, and optional server alias.
+
+```sh
+bash bootstrap-deploy.sh    # prefix: acme      → acmepush
+bash bootstrap-deploy.sh    # prefix: widgetco  → widgetcopush
+bash bootstrap-deploy.sh    # prefix: blog      → blogpush
+```
+
+The generated files and config blocks are scoped by prefix, so projects do not overwrite each other.
+
+`gdw-list` shows the bootstrapped projects currently sourced from `~/.zshrc`.
+
+## Manual setup
+
+The bootstrap is the normal path, but the workflow can be wired manually.
+
+1. Copy the library somewhere stable:
+
+   ```sh
+   cp git-deploy-lib.zsh ~/.git-deploy-lib.zsh
+   ```
+
+2. Copy the workflow template:
+
+   ```sh
+   cp git-deploy-workflow.zsh ~/.acme-workflow.zsh
+   ```
+
+3. Edit the project variables in the copied workflow file.
+4. Source it from `~/.zshrc`:
+
+   ```zsh
+   source "$HOME/.acme-workflow.zsh"
+   ```
+
+5. Reload zsh:
+
+   ```sh
+   exec zsh
+   ```
+
+Manual setup is useful for review or customization, but the bootstrap handles the repetitive SSH and prefix wiring more safely.
+
+## Uninstalling
+
+```sh
+bash bootstrap-deploy.sh --uninstall
+```
+
+The uninstall flow asks which prefix to remove, then strips that prefix's marker blocks from:
+
+- `~/.zshrc`
+- `~/.ssh/config`
+
+It leaves SSH keys and rendered workflow files in place, then prints the exact `rm` commands if you want to remove those too.
+
+Backups are made before any modification.
 
 ## Project structure
 
-```
+```text
 zsh-git-deploy-workflow/
-├── git-deploy-lib.zsh        # Shared workflow logic (sourced by all projects)
-├── git-deploy-workflow.zsh   # Per-project template (rendered by the bootstrap)
 ├── bootstrap-deploy.sh       # Interactive installer / uninstaller
-├── init-project.sh           # New-project scaffolder (optionally chains into bootstrap)
-├── README.md                 # You are here
-├── LICENSE                   # MIT
+├── git-deploy-lib.zsh        # Shared workflow logic
+├── git-deploy-workflow.zsh   # Per-project workflow template
+├── init-project.sh           # New-project scaffolder
+├── README.md                 # Documentation
+├── LICENSE                   # MIT license
 └── .gitignore
 ```
 
-Four files of code; everything else is documentation.
-
 ## Security model
 
-This tool generates and manages SSH keys, so it's worth being explicit about what it does and doesn't trust:
+This tool manages SSH-based Git workflows, so the boundaries matter.
 
-- **Separate keys per concern.** GitHub and the server get different keys. If one leaks, the other side is unaffected.
-- **`IdentitiesOnly yes`** in every Host block. SSH offers only the explicitly assigned key, never every key in your agent — important if you have many keys.
-- **`AddKeysToAgent yes` + `UseKeychain yes`** on macOS (Linux uses `AddKeysToAgent yes` only — `UseKeychain` is a macOS-only directive). Passphrases are cached in the macOS Keychain, not typed for every command.
-- **Read-only deploy key on the server.** The bootstrap walks you through this in step 3 of its "next steps" output. The server's GitHub key is registered as a read-only Deploy Key on the repo, so the server can `git pull` updates but cannot push back.
-- **No network calls during bootstrap.** Everything happens on your laptop; no telemetry, no remote config fetching.
-- **Backups before mutations.** Both `~/.zshrc` and `~/.ssh/config` are copied to timestamped `.bak.*` files before being modified.
+- **Separate keys per concern.** Local GitHub access, server SSH access, and server-side GitHub deploy access can use separate keys.
+- **Read-only server deploy key.** The server-side GitHub key is intended to be registered as a read-only deploy key, so the server can pull from the repo but cannot push back.
+- **Repo-specific server aliases.** Server-side GitHub access should use aliases such as `github-acme`, not a global `Host github.com` override, when multiple repos or deploy keys are involved.
+- **`IdentitiesOnly yes`.** Generated SSH blocks force SSH to offer only the configured key for that host.
+- **macOS Keychain support where valid.** macOS blocks include `UseKeychain yes`; Linux blocks do not because `UseKeychain` is a macOS-specific SSH directive.
+- **No private keys are copied into the repo.** Keys stay in `~/.ssh` on the machine that uses them.
+- **No signing keys on the production server.** The server only needs pull access through its deploy key. Commit signing remains local.
+- **Fast-forward-only server pulls.** Deploy uses `git pull --ff-only` so the server does not create surprise merge commits.
+- **Backups before config changes.** Shell and SSH config files are backed up before marker blocks are edited.
 
 ## Troubleshooting
 
-**`<prefix>pull` says "Local changes or untracked files detected"**
-You have uncommitted edits. Either commit them with `<prefix>push "..."`, move them onto a branch with `<prefix>branch ...`, or discard them with `git restore .` and `git clean -fd`.
+### `<prefix>pull` says local changes were detected
 
-**`deploy-<prefix>` fails with permission denied**
-The server's SSH user can't reach your GitHub deploy key, or the deploy key doesn't have access to the repo. Re-test with `ssh <your-alias> "ssh -T git@github-<prefix>"` (using the alias you configured) — it should report a successful GitHub authentication on the server side.
+You have uncommitted or untracked files.
 
-**Server pull fails with merge conflicts**
-The server has uncommitted local changes (often from someone editing files via SFTP). SSH in and resolve manually:
+Check the state:
 
 ```sh
-ssh <your-alias>
-cd <your-server-path>
-git status
-# git stash, git checkout -- <file>, etc.
+<prefix>status
 ```
 
-**`<prefix>push` hangs forever**
-Usually a network issue or an interactive SSH prompt. Cancel with `Ctrl+C`, then test `ssh <your-alias> echo ok` and `ssh -T github.com` separately to find the broken link.
+Then either commit the work, move it to a branch, or discard it intentionally.
 
-**Bootstrap says "Could not find workflow template"**
-Run the bootstrap from inside the cloned repo (where `git-deploy-workflow.zsh` lives), not from elsewhere. The script looks for the template alongside itself.
+### `<prefix>push` refuses because I am not on `main`
+
+That is expected. `<prefix>push` is the release path and only runs from `main`.
+
+For branch work, use normal Git:
+
+```sh
+git checkout -b feature/my-change
+git add .
+git commit -m "work in progress"
+git push -u origin feature/my-change
+```
+
+### `deploy-<prefix>` fails with permission denied
+
+The server may not have working GitHub deploy-key access.
+
+Test from your laptop through the server:
+
+```sh
+ssh <your-server-alias> "ssh -T git@github-<prefix>"
+```
+
+That should test the server's configured GitHub alias, not your laptop's GitHub key.
+
+### Server pull fails with merge conflicts
+
+The server probably has local changes.
+
+SSH into the server and inspect the repo:
+
+```sh
+ssh <your-server-alias>
+cd <your-server-path>
+git status
+```
+
+Resolve the server state manually, then rerun the deploy command.
+
+### `<prefix>push` hangs
+
+It is usually an SSH prompt, network issue, or GitHub authentication issue.
+
+Test each link separately:
+
+```sh
+ssh -T git@github.com
+ssh <your-server-alias> "echo ok"
+ssh <your-server-alias> "ssh -T git@github-<prefix>"
+```
+
+### Bootstrap says it cannot find the workflow template
+
+Run `bootstrap-deploy.sh` from the cloned workflow repo, or call it by full path so it can find the files next to itself:
+
+```sh
+bash ~/path/to/zsh-git-deploy-workflow/bootstrap-deploy.sh
+```
+
+### GitHub CLI deploy-key registration fails
+
+The bootstrap should fall back to manual instructions. Copy the printed public key and add it in GitHub under:
+
+```text
+Repository → Settings → Deploy keys → Add deploy key
+```
+
+Leave write access disabled for a read-only deploy key.
 
 ## License
 
-MIT. See [LICENSE](LICENSE) for the full text. Use this however you want; attribution appreciated but not required.
+MIT. See [LICENSE](LICENSE).
 
----
-
-*Built originally for the [Severino Labs Security Layer](https://github.com/joeseverino/severino-labs-security-layer) WordPress plugin, generalized so anyone can use it for anything.*
+Built originally for the [Severino Labs Security Layer](https://github.com/joeseverino/severino-labs-security-layer) WordPress plugin, then generalized for reusable Git-based project deployment.
