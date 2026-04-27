@@ -50,6 +50,16 @@ LIB_DEST="$HOME/.git-deploy-lib.zsh"
 ZSHRC="$HOME/.zshrc"
 SSH_CONFIG="$HOME/.ssh/config"
 
+# Optional user defaults file. If present, its values are used as
+# implicit answers and the corresponding prompts are skipped.
+#
+# Supported variables:
+#   GDW_DEFAULT_GH_USER         e.g. "joeseverino"
+#   GDW_DEFAULT_GH_VISIBILITY   "public" or "private"
+#   GDW_DEFAULT_SSH_HOST        e.g. "jseverino.net"
+GDW_CONFIG="$HOME/.gdw-config"
+[ -f "$GDW_CONFIG" ] && . "$GDW_CONFIG"
+
 # Marker blocks — used so we can find/remove our additions later.
 # __PREFIX__ is replaced at runtime so multiple projects can coexist.
 ZSHRC_MARK_START="# >>> __PREFIX__ git deploy workflow >>>"
@@ -479,19 +489,49 @@ EOF
   fi
 
   echo
-  info "  → Reading the public key..."
-  echo
-  echo "  ─── Copy everything between the lines ───"
-  echo
-  ssh "$SSH_HOST" "cat $remote_key.pub" || {
+  info "  → Reading the public key from the server..."
+  local pubkey
+  pubkey="$(ssh "$SSH_HOST" "cat $remote_key.pub" 2>/dev/null)" || {
     err "  Could not read the public key from the server."
     return 1
   }
-  echo
-  echo "  ─── End of public key ───"
-  echo
 
-  cat <<EOF
+  # ---- Try to auto-register the key via the GitHub CLI ----
+  local KEY_ADDED=0
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    # Parse owner/repo out of the server remote URL.
+    # Handles both git@github-alias:owner/repo.git and git@github.com:owner/repo.git
+    local repo_path
+    repo_path="${SERVER_REMOTE##*:}"
+    repo_path="${repo_path%.git}"
+
+    if [ -n "$repo_path" ] && printf '%s' "$repo_path" | grep -qE '^[^/]+/[^/]+$'; then
+      info "  → GitHub CLI detected. Attempting to add the deploy key directly to '$repo_path'..."
+      if printf '%s\n' "$pubkey" | gh repo deploy-key add - \
+        --title "$PROJECT_LABEL deploy" \
+        --repo "$repo_path" 2>&1 | sed 's/^/    /'; then
+        ok "  ✓ Deploy key added to $repo_path (read-only)."
+        KEY_ADDED=1
+      else
+        warn "  gh deploy-key add failed — falling back to manual paste below."
+        warn "  (Common cause: your gh token doesn't have admin:repo_hook scope."
+        warn "   Run 'gh auth refresh -s admin:repo_hook' to grant it.)"
+      fi
+    else
+      warn "  Couldn't parse owner/repo from $SERVER_REMOTE — falling back to manual paste."
+    fi
+  fi
+
+  if [ "$KEY_ADDED" -eq 0 ]; then
+    echo
+    echo "  ─── Copy everything between the lines ───"
+    echo
+    printf '%s\n' "$pubkey"
+    echo
+    echo "  ─── End of public key ───"
+    echo
+
+    cat <<EOF
   Now in your browser:
 
     1. Open your repo's GitHub deploy keys page:
@@ -501,12 +541,16 @@ EOF
     4. Title it: $PROJECT_LABEL deploy
     5. Leave "Allow write access" unchecked — this key should be read-only.
     6. Click "Add key"
+
+  (Tip: install the GitHub CLI to skip the browser step next time:
+    brew install gh && gh auth login --scopes admin:repo_hook)
 EOF
 
-  if command -v open >/dev/null 2>&1; then
-    echo
-    if confirm "     Open GitHub in your browser?"; then
-      open "https://github.com/" 2>/dev/null || true
+    if command -v open >/dev/null 2>&1; then
+      echo
+      if confirm "     Open GitHub in your browser?"; then
+        open "https://github.com/" 2>/dev/null || true
+      fi
     fi
   fi
 
@@ -595,8 +639,21 @@ EOF
   fi
 
   # ----- Project identity -------------------------------------
+  # Project name is auto-derived from the current directory if we're
+  # running inside one — that matches the new init-project flow.
+  # Otherwise prompt for it.
   section "Project info"
-  PROJECT_LABEL="$(ask 'Project name (human-readable)' 'My Project')"
+  local pwd_basename
+  pwd_basename="$(basename "$(pwd)")"
+
+  if [ -d "$(pwd)/.git" ] || [ "$pwd_basename" != "$(basename "$SCRIPT_DIR")" ]; then
+    PROJECT_LABEL="$pwd_basename"
+    info "  Project name: $PROJECT_LABEL    (from current directory)"
+  else
+    # Running from inside the workflow repo itself — ask.
+    PROJECT_LABEL="$(ask 'Project name (human-readable)' 'My Project')"
+  fi
+
   PROJECT_PREFIX="$(ask 'Command prefix (lowercase; e.g. theme gives themepull/themepush)' 'mp')"
 
   if ! printf '%s' "$PROJECT_PREFIX" | grep -Eq '^[a-z][a-z0-9_]*$'; then
@@ -633,7 +690,16 @@ EOF
   fi
 
   # ----- Project paths ----------------------------------------
-  REPO_PATH="$(ask 'Local clone path of the project' "$HOME/Code/$PROJECT_PREFIX")"
+  # If we're running inside what looks like a project repo (has .git
+  # and isn't this very tool), default REPO_PATH to $PWD. Otherwise
+  # fall back to the conventional ~/Code/<prefix>.
+  local repo_path_default
+  if [ -d "$(pwd)/.git" ] && [ "$(pwd)" != "$SCRIPT_DIR" ]; then
+    repo_path_default="$(pwd)"
+  else
+    repo_path_default="$HOME/Code/$PROJECT_PREFIX"
+  fi
+  REPO_PATH="$(ask 'Local clone path of the project' "$repo_path_default")"
   ZIP_PATH="$(ask 'Local zip output path (for review/distribution)' "$HOME/Downloads/${PROJECT_PREFIX}-review.zip")"
 
   # Server-mode-only fields. In no-server mode these stay empty so the
@@ -683,7 +749,13 @@ EOF
   # ----- Production server SSH --------------------------------
   if [ "$HAS_SERVER" -eq 1 ]; then
     section "Production server SSH"
-    SSH_HOST="$(ask 'SSH host alias to use locally' "${PROJECT_PREFIX}-prod")"
+    local ssh_host_default="${PROJECT_PREFIX}-prod"
+    if [ -n "${GDW_DEFAULT_SSH_HOST:-}" ]; then
+      SSH_HOST="$GDW_DEFAULT_SSH_HOST"
+      ok "  Using SSH host from ~/.gdw-config: $SSH_HOST"
+    else
+      SSH_HOST="$(ask 'SSH host alias to use locally' "$ssh_host_default")"
+    fi
 
     if ssh_config_has_host "$SSH_HOST"; then
       info "  Found existing Host $SSH_HOST in $SSH_CONFIG."
@@ -932,6 +1004,29 @@ EOF
   fi
 
   ok "Bootstrap complete."
+
+  # Auto-install gdw-bootstrap alias on first run, same pattern as
+  # init-project's gdw-init alias.
+  local boot_alias_start="# >>> gdw-bootstrap alias >>>"
+  local boot_alias_end="# <<< gdw-bootstrap alias <<<"
+  if [ ! -f "$ZSHRC" ] || ! grep -Fq "$boot_alias_start" "$ZSHRC"; then
+    section "Convenience alias"
+    info "  Adding 'gdw-bootstrap' alias so you can re-run this from anywhere."
+    if [ -f "$ZSHRC" ]; then
+      local boot_backup="${ZSHRC}.bak.$(date +%Y%m%d-%H%M%S)"
+      cp "$ZSHRC" "$boot_backup"
+      info "  Backed up to: $boot_backup"
+    fi
+    {
+      [ -f "$ZSHRC" ] && cat "$ZSHRC"
+      printf '\n%s\nalias gdw-bootstrap=%s\n%s\n' \
+        "$boot_alias_start" \
+        "'bash \"$SCRIPT_DIR/bootstrap-deploy.sh\"'" \
+        "$boot_alias_end"
+    } > "${ZSHRC}.new"
+    mv "${ZSHRC}.new" "$ZSHRC"
+    ok "  Added: alias gdw-bootstrap='bash \"$SCRIPT_DIR/bootstrap-deploy.sh\"'"
+  fi
 
   echo
   _color "1;33" "  ⚠  RELOAD YOUR SHELL to pick up the new functions:"

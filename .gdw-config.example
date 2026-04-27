@@ -1,0 +1,23 @@
+# git-deploy-workflow user defaults
+#
+# Copy this file to ~/.gdw-config and uncomment any line you want to
+# pre-set. Both bootstrap-deploy.sh and init-project.sh source it at
+# startup. When a value is set here, the corresponding prompt is
+# skipped entirely.
+#
+# Useful when you only have one GitHub account, one deploy server, etc.
+# and you're tired of confirming the same defaults every time.
+#
+#   cp .gdw-config.example ~/.gdw-config
+#   $EDITOR ~/.gdw-config
+
+# Your GitHub username. Skips the GH username prompt in init-project.
+# GDW_DEFAULT_GH_USER="joeseverino"
+
+# Default visibility for new GitHub repos created via init-project.
+# One of: public, private
+# GDW_DEFAULT_GH_VISIBILITY="private"
+
+# Default SSH host alias for the production server in bootstrap-deploy.
+# This is the alias from your local ~/.ssh/config (e.g. "jseverino.net").
+# GDW_DEFAULT_SSH_HOST="jseverino.net"

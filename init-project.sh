@@ -39,6 +39,16 @@ ZSHRC="$HOME/.zshrc"
 ALIAS_MARK_START="# >>> gdw-init alias >>>"
 ALIAS_MARK_END="# <<< gdw-init alias <<<"
 
+# Optional user defaults file. If present, its values are used as
+# implicit answers and the corresponding prompts are skipped.
+#
+# Supported variables:
+#   GDW_DEFAULT_GH_USER         e.g. "joeseverino"
+#   GDW_DEFAULT_GH_VISIBILITY   "public" or "private"
+#   GDW_DEFAULT_SSH_HOST        e.g. "jseverino.net"  (used by bootstrap)
+GDW_CONFIG="$HOME/.gdw-config"
+[ -f "$GDW_CONFIG" ] && . "$GDW_CONFIG"
+
 DRY_RUN=0
 
 
@@ -239,22 +249,33 @@ echo
 PROJECT_DESC="$(ask 'One-line description' "A new ${PROJECT_NAME} project.")"
 
 section "GitHub"
-GH_DETECTED_RAW="$(detect_github_username)"
-GH_USER_DEFAULT="${GH_DETECTED_RAW%%|*}"
-GH_USER_SOURCE="${GH_DETECTED_RAW##*|}"
+if [ -n "${GDW_DEFAULT_GH_USER:-}" ]; then
+  GH_USER="$GDW_DEFAULT_GH_USER"
+  ok "  Using GitHub username from ~/.gdw-config: $GH_USER"
+else
+  GH_DETECTED_RAW="$(detect_github_username)"
+  GH_USER_DEFAULT="${GH_DETECTED_RAW%%|*}"
+  GH_USER_SOURCE="${GH_DETECTED_RAW##*|}"
 
-case "$GH_USER_SOURCE" in
-  gh-cli)     info "  Detected GitHub username from 'gh' CLI: $GH_USER_DEFAULT" ;;
-  git-config) info "  Guessed GitHub username from 'git config --global user.name': $GH_USER_DEFAULT" ;;
-  *)          warn "  No GitHub username detected — please type yours below." ;;
-esac
+  case "$GH_USER_SOURCE" in
+    gh-cli)     info "  Detected GitHub username from 'gh' CLI: $GH_USER_DEFAULT" ;;
+    git-config) info "  Guessed GitHub username from 'git config --global user.name': $GH_USER_DEFAULT" ;;
+    *)          warn "  No GitHub username detected — please type yours below." ;;
+  esac
 
-GH_USER="$(ask 'GitHub username' "$GH_USER_DEFAULT")"
-if [ -z "$GH_USER" ]; then
-  err "GitHub username is required. Aborting."
-  exit 1
+  GH_USER="$(ask 'GitHub username' "$GH_USER_DEFAULT")"
+  if [ -z "$GH_USER" ]; then
+    err "GitHub username is required. Aborting."
+    exit 1
+  fi
 fi
-GH_VISIBILITY="$(ask 'Visibility (public / private)' 'private')"
+
+if [ -n "${GDW_DEFAULT_GH_VISIBILITY:-}" ]; then
+  GH_VISIBILITY="$GDW_DEFAULT_GH_VISIBILITY"
+  ok "  Using visibility from ~/.gdw-config: $GH_VISIBILITY"
+else
+  GH_VISIBILITY="$(ask 'Visibility (public / private)' 'private')"
+fi
 
 REMOTE_URL="git@github.com:${GH_USER}/${GH_REPO}.git"
 
@@ -331,13 +352,13 @@ if ! git commit -m "Initial commit" >/dev/null; then
 fi
 ok "  Initial commit made on main"
 
-section "Setting remote"
-git remote add origin "$REMOTE_URL"
-ok "  origin -> $REMOTE_URL"
-
-
 # ---------------------------------------------------------------------
 # GitHub create + push
+#
+# Important: we do NOT pre-add the `origin` remote. If `gh` CLI creates
+# the repo via --source=. --push, it adds origin itself, and a
+# pre-existing origin would make `gh` fail with "Unable to add remote
+# origin". Only add origin manually on the fallback path.
 # ---------------------------------------------------------------------
 
 section "GitHub repo"
@@ -355,7 +376,7 @@ if [ "$HAS_GH" -eq 1 ]; then
       *)       vis_flag="--private" ;;
     esac
     if gh repo create "${GH_USER}/${GH_REPO}" $vis_flag --source=. --push --description "$PROJECT_DESC"; then
-      ok "  Repo created and pushed."
+      ok "  Repo created and pushed (origin added by gh)."
       REPO_PUSHED=1
     else
       warn "  gh repo create failed — finish manually below."
@@ -364,6 +385,10 @@ if [ "$HAS_GH" -eq 1 ]; then
 fi
 
 if [ "$REPO_PUSHED" -eq 0 ]; then
+  # Fallback: add origin ourselves so the user's manual `git push -u
+  # origin main` step works without an extra command.
+  git remote add origin "$REMOTE_URL"
+  ok "  origin -> $REMOTE_URL"
   echo
   cat <<EOF
   Manual GitHub steps:
