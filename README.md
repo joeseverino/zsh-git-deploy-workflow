@@ -1,122 +1,129 @@
 # zsh-git-deploy-workflow
 
-A small, opinionated **edit → commit → push → deploy** workflow for projects that live in a Git repo on your laptop and, optionally, a Git checkout on a server you SSH into.
+An **edit → commit → push → deploy** workflow for projects that live in a Git repo on your laptop and, optionally, a Git checkout on a server you SSH into.
 
-One bootstrap command sets up project-specific zsh commands, SSH keys, SSH config entries, a shared deploy library, and a repeatable push/deploy flow.
+One bootstrap command sets up everything: project-specific shell commands, SSH keys, SSH config entries, and a repeatable push/deploy flow.
 
 ```sh
 acmepush "fix: tighten cache headers"
 # stages everything, commits, pushes to GitHub, SSHes into the
-# server, and runs git pull --ff-only
+# server, and runs git pull — all in one command
 ```
 
-This is not a CI service. No webhook, no YAML pipeline, no third-party dashboard. It wraps `git`, `ssh`, `ssh-keygen`, and shell scripts so the deploy story stays readable, local, and easy to audit.
+No CI service, no YAML pipeline, no third-party dashboard. Just `git`, `ssh`, and shell scripts. Readable, local, and easy to audit.
 
-## Why bother
-
-Many small projects do not need a full deployment pipeline, but they still deserve something better than manual file edits.
-
-Common options usually fall into one of these buckets:
-
-- **SFTP** — no clean version history; rollback depends on backups and memory.
-- **Platform upload forms** — easy to overwrite files blindly and mix code with runtime data.
-- **Push-to-deploy CI** — powerful, but often too much ceremony for a small project whose deploy step is really just `git pull` on a server.
-
-This workflow is for the middle ground: projects you own end-to-end, where a simple Git-based release path is enough, but you still want safety checks, repeatability, key separation, and clean commands.
+---
 
 ## Table of Contents
 
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
-- [Configuration defaults (~/.gdw-config)](#configuration-defaults-gdw-config)
-- [Express mode](#express-mode)
-- [CLI flags reference](#cli-flags-reference)
+- [Daily use](#daily-use)
 - [Modes](#modes)
 - [What you get](#what-you-get)
-- [Daily use](#daily-use)
+- [Express mode](#express-mode)
+- [Configuration defaults (~/.gdw-config)](#configuration-defaults-gdw-config)
+- [CLI flags reference](#cli-flags-reference)
 - [Safety and idempotence](#safety-and-idempotence)
 - [What the bootstrap does](#what-the-bootstrap-does)
 - [New-project scaffolding (gdw-init)](#new-project-scaffolding-gdw-init)
 - [Architecture](#architecture)
 - [Multiple projects](#multiple-projects)
-- [Manual setup](#manual-setup)
 - [Uninstalling](#uninstalling)
+- [Manual setup](#manual-setup)
 - [Project structure](#project-structure)
 - [Security model](#security-model)
 - [Troubleshooting](#troubleshooting)
+- [What this is not](#what-this-is-not)
 - [License](#license)
+
+---
 
 ## Requirements
 
-Required:
+**Required:**
 
-- macOS or Linux.
-- **zsh** as your interactive shell.
-- **bash 3.2+** for the bootstrap scripts.
-- `git`, `ssh`, `ssh-keygen`, `awk`, `sed`, `mktemp`, and standard shell tools.
-- A GitHub repository for the project.
-- For server mode: a server you can SSH into where the project should live as a Git checkout.
+- macOS or Linux
+- **zsh** as your interactive shell
+- **bash 3.2+** to run the bootstrap scripts
+- `git`, `ssh`, `ssh-keygen`, `sed`, `awk` — standard on most systems
+- A GitHub repository for the project
+- For server mode: a server you can SSH into
 
-Optional but recommended:
+**Optional but strongly recommended:**
 
-- **GitHub CLI (`gh`)** — enables automatic repo creation and deploy-key registration. Without it, the scripts print the manual GitHub steps instead.
+- **GitHub CLI (`gh`)** — enables automatic repo creation and SSH key registration. Install it, then run `gh auth login` before running the bootstrap. Without it (or if you skip signing in), the scripts walk you through the manual steps instead.
 
-No language runtime, package manager, or application framework is required.
+> **Ubuntu users:** Ubuntu's default shell is bash, not zsh. The workflow files are sourced from `~/.zshrc`, so you need zsh set as your login shell for the aliases and functions to be available in new terminals. After installing zsh (`sudo apt-get install zsh`), run:
+> ```sh
+> chsh -s $(which zsh)
+> ```
+> Then log out and back in. You only need to do this once per machine.
+
+No language runtime, package manager, or framework required.
+
+---
 
 ## Quick start
 
-### 1. Clone this workflow repo
+### 1. Clone this repo
+
+If SSH is already set up on this machine:
 
 ```sh
 git clone git@github.com:joeseverino/zsh-git-deploy-workflow.git
 ```
 
-### 2. Set up your defaults (optional but recommended)
+If this is a fresh machine where SSH isn't configured yet, use HTTPS instead — the bootstrap will set up SSH for your projects:
 
-Copy the config example to your home directory and fill in your values:
+```sh
+git clone https://github.com/joeseverino/zsh-git-deploy-workflow.git
+```
+
+### 2. Set up your defaults (optional but saves time)
 
 ```sh
 cp zsh-git-deploy-workflow/.gdw-config.example ~/.gdw-config
 $EDITOR ~/.gdw-config
 ```
 
-See [Configuration defaults](#configuration-defaults-gdw-config) for the full list of options. The more you fill in, the less the bootstrap asks.
+The more you fill in, the less the bootstrap asks. See [Configuration defaults](#configuration-defaults-gdw-config).
 
-### 3a. Scaffold a new project (recommended)
+### 3a. Starting a brand-new project
+
+`init-project.sh` and `bootstrap-deploy.sh` are bash scripts — running them with `bash` is correct. They install the zsh workflow files; they don't need to run in zsh themselves.
 
 ```sh
-mkdir my-new-plugin
-cd my-new-plugin
+mkdir my-plugin
+cd my-plugin
 bash ~/path/to/zsh-git-deploy-workflow/init-project.sh
 ```
 
-This creates the repo, pushes it to GitHub, and chains directly into the bootstrap. A `gdw-init` alias is added to `~/.zshrc` on first run so future scaffolds are just:
+This creates the repo, pushes it to GitHub, and chains directly into the bootstrap. After the first run, a `gdw-init` alias is added to `~/.zshrc`:
 
 ```sh
 mkdir my-project && cd my-project && gdw-init
 ```
 
-### 3b. Bootstrap an existing project
-
-From the project directory:
+### 3b. Bootstrapping an existing project
 
 ```sh
 cd ~/path/to/your-project
 bash ~/path/to/zsh-git-deploy-workflow/bootstrap-deploy.sh
 ```
 
-A `gdw-bootstrap` alias is added on first run.
+A `gdw-bootstrap` alias is added after the first run.
 
 ### 4. Reload your shell
 
 ```sh
 exec zsh
-acmehelp
+acmehelp   # replace "acme" with the prefix you chose
 ```
 
 ### One-liner with express mode
 
-With a populated `~/.gdw-config`, the entire flow from empty directory to deployed server can be run with a single command:
+With a populated `~/.gdw-config`, the full flow from empty directory to deployed server is a single command:
 
 ```sh
 mkdir my-plugin && cd my-plugin
@@ -126,15 +133,138 @@ gdw-init --express \
   --server-path /home/user/public_html/wp-content/plugins/my-plugin
 ```
 
-Express mode auto-yes every confirmation and runs every step — including the server-side deploy key setup and the initial server deploy — without pausing. See [Express mode](#express-mode) for details.
+See [Express mode](#express-mode) for what this does automatically.
+
+---
+
+## Daily use
+
+After bootstrap, everything runs through the prefix you chose. For prefix `acme`:
+
+```sh
+# Pull the latest before starting work
+acmepull
+
+# Make your changes, then commit, push, and deploy in one step
+acmepush "fix: stop double-encoding URLs"
+
+# Check what's changed
+acmestatus
+
+# Work on something that isn't ready to ship yet
+acmebranch feature/new-thing
+git push -u origin feature/new-thing
+
+# Build a clean zip for review or distribution
+acmezip
+
+# Undo the last deploy (prompts for YES confirmation)
+acmerevert
+```
+
+---
+
+## Modes
+
+### Server mode
+
+For projects that deploy to a remote server — WordPress plugins, themes, static sites, or any app where deploy means "SSH in and pull latest."
+
+`acmepush "message"` does this in order:
+
+1. Confirms you are on `main`
+2. Stages all changes
+3. Stops cleanly if there is nothing to commit
+4. Shows the pending status
+5. Creates the commit
+6. Pushes to GitHub
+7. SSHes into the server and runs a fast-forward-only pull
+
+If the server path does not exist yet, the first deploy clones the repo into place. If the path exists but is not a Git repo, it refuses to touch it.
+
+### No-server mode
+
+For libraries, scripts, or any project that does not deploy anywhere yet. `acmepush` stages, commits, and pushes to GitHub. The deploy step is skipped automatically.
+
+To add a server later, rerun the bootstrap with the same prefix and choose `replace`.
+
+---
+
+## What you get
+
+After bootstrap, your shell gets project-specific commands scoped to the prefix you chose. For prefix `acme`:
+
+| Command | What it does |
+| --- | --- |
+| `acmepull` | Pulls latest `main`. Refuses if local edits exist. |
+| `acmepush "message"` | Stages, commits, pushes, and deploys. Only runs from `main`. |
+| `acmebranch <name>` | Creates a new branch from the current state. |
+| `acmerevert` | Reverts the latest `main` commit after `YES` confirmation, pushes the revert, and redeploys. |
+| `acmestatus` | Shows short Git status and current branch. |
+| `acmezip` | Builds a clean ZIP from the current commit using `git archive`. |
+| `deploy-acme` | Runs only the deploy step (server `git pull` or initial clone). |
+| `acmehelp` | Shows the command list and configured paths. |
+| `gdw-list` | Lists every bootstrapped project found in `~/.zshrc`. |
+
+---
+
+## Express mode
+
+Pass `--express` to either script to skip all yes/no confirmations and run every step automatically.
+
+```sh
+gdw-init --express --description "My plugin" --server-path /var/www/my-plugin
+# or
+gdw-bootstrap --express --prefix theme --server-path /var/www/theme
+```
+
+In express mode:
+
+- Every `[Y/n]` confirmation is automatically answered yes and logged.
+- The command prefix is auto-derived from the project directory name (lowercased, non-alphanumeric characters stripped). `my-new-plugin` becomes `mynewplugin`. This happens in both interactive and express mode — express just skips the confirmation prompt. Pass `--prefix` to set something shorter.
+- All fields that have a config default or can be derived (GitHub host, SSH alias, server alias, remote URL, zip path) are resolved silently.
+- The server-side deploy key setup runs fully — key generation, SSH alias config, GitHub registration, and connection test — without pausing.
+- The initial server deploy runs automatically at the end.
+
+**The only prompt that cannot be skipped in express mode** is typing the full repo name to confirm GitHub repo deletion during uninstall. That gate is always interactive.
+
+### Full express example
+
+With `~/.gdw-config` populated:
+
+```sh
+mkdir acme-plugin && cd acme-plugin
+gdw-init --express \
+  --prefix acme \
+  --description "Acme WordPress plugin" \
+  --server-path /home/user/public_html/wp-content/plugins/acme-plugin
+```
+
+`--prefix` is recommended in express mode. Without it, a directory named `my-new-plugin` becomes the prefix `mynewplugin`, giving you longer daily commands like `mynewpluginpush`. A short explicit prefix like `acme` gives you `acmepush`.
+
+This single command:
+
+1. Writes `.gitignore` and `README.md`, runs `git init`, makes the initial commit
+2. Creates the private GitHub repo and pushes via `gh`
+3. Installs the shared deploy library and renders the workflow file
+4. Reuses or creates SSH keys for GitHub and the server
+5. Patches `~/.ssh/config` and `~/.zshrc` as needed
+6. SSHes into the server and generates a project-specific deploy key
+7. Registers the deploy key with GitHub via `gh repo deploy-key add`
+8. Tests the server's GitHub authentication
+9. Runs the initial deploy — cloning the repo at the server path
+
+After this, `test6push "first change"` is the entire release flow.
+
+---
 
 ## Configuration defaults (`~/.gdw-config`)
 
-Both `init-project.sh` and `bootstrap-deploy.sh` source `~/.gdw-config` at startup. Any variable set there is used as a silent default, skipping the corresponding prompt entirely.
+Both scripts source `~/.gdw-config` at startup. Any variable set there is used as a silent default, skipping the corresponding prompt.
 
-The priority order for every setting is: **CLI flag → `~/.gdw-config` → interactive prompt**.
+Priority order for every setting: **CLI flag → `~/.gdw-config` → interactive prompt**
 
-Copy the example file to get started:
+Copy the example to get started:
 
 ```sh
 cp zsh-git-deploy-workflow/.gdw-config.example ~/.gdw-config
@@ -146,93 +276,45 @@ cp zsh-git-deploy-workflow/.gdw-config.example ~/.gdw-config
 # ── init-project.sh ─────────────────────────────────────────────────────────
 
 # Your GitHub username. Skips the username prompt.
-GDW_DEFAULT_GH_USER="joeseverino"
+GDW_DEFAULT_GH_USER="your-github-username"
 
-# Default visibility for new repos created via init-project. One of: public, private
+# Default visibility for new repos. One of: public, private
 GDW_DEFAULT_GH_VISIBILITY="private"
 
 # ── bootstrap-deploy.sh ─────────────────────────────────────────────────────
 
-# SSH host alias for the production server (must match a Host in ~/.ssh/config).
-# When set, bootstrap skips the SSH host alias prompt entirely.
+# SSH host alias for your production server (must match a Host in ~/.ssh/config).
 GDW_DEFAULT_SSH_HOST="myserver.net"
 
 # GitHub SSH hostname. Almost always "github.com".
 GDW_DEFAULT_GITHUB_HOST="github.com"
 
-# Directory for zip review archives. The prefix and "-review.zip" are appended
-# automatically, e.g. ~/Downloads/theme-review.zip
+# Directory for zip review archives. Prefix and "-review.zip" are appended
+# automatically — e.g. ~/Downloads/theme-review.zip
 GDW_DEFAULT_ZIP_DIR="$HOME/Downloads"
 
 # Server-side GitHub SSH alias pattern. __PREFIX__ is substituted at bootstrap
-# time, e.g. "github-__PREFIX__" → "github-theme" for prefix "theme".
+# time — e.g. "github-__PREFIX__" becomes "github-theme" for prefix "theme".
 GDW_DEFAULT_SERVER_GITHUB_ALIAS="github-__PREFIX__"
 ```
 
-A fully populated config means most projects only need a prefix and a server path from the user — or nothing at all in express mode.
+A fully populated config means most projects only need a prefix and a server path — or nothing at all in express mode.
 
-## Express mode
-
-Pass `--express` to either script to run completely without manual confirmation prompts.
-
-```sh
-gdw-init --express --description "My plugin" --server-path /var/www/my-plugin
-# or
-gdw-bootstrap --express --prefix theme --server-path /var/www/theme
-```
-
-In express mode:
-
-- Every yes/no confirmation (`[Y/n]`) is automatically answered yes and logged.
-- The command prefix is auto-derived from the project directory name by lowercasing it and stripping hyphens and other non-alphanumeric characters. `my-new-plugin` becomes `mynewplugin`. Override with `--prefix` if you want something shorter.
-- All fields that have a config default or can be derived (GitHub host, SSH host alias, server GitHub alias, server remote URL, zip path, local path) are resolved silently.
-- The server-side setup runs fully — deploy key generation, SSH alias config, GitHub key registration, and the connection test — without pausing.
-- The test retry loop runs once instead of looping indefinitely.
-- The initial server deploy (`deploy-<prefix>`) runs automatically at the end.
-
-Express mode is designed to be combined with CLI flags and `~/.gdw-config` for fully non-interactive runs. The only prompts that can still appear in express mode are fields that cannot be derived and were not provided — most commonly the server hostname when the SSH host alias is not yet in `~/.ssh/config`.
-
-### Full express example
-
-Given a `~/.gdw-config` with `GDW_DEFAULT_GH_USER`, `GDW_DEFAULT_SSH_HOST`, `GDW_DEFAULT_GITHUB_HOST`, `GDW_DEFAULT_ZIP_DIR`, and `GDW_DEFAULT_SERVER_GITHUB_ALIAS` set:
-
-```sh
-mkdir test-project-6 && cd test-project-6
-gdw-init --express \
-  --prefix test6 \
-  --description "Test project 6" \
-  --server-path /home/user/public_html/wp-content/plugins/test-project-6
-```
-
-`--prefix` is recommended in express mode. Without it, the prefix is auto-derived from the directory name — `test-project-6` becomes `testproject6` — which works, but produces longer daily-use commands like `testproject6push`. A short explicit prefix like `test6` gives you `test6push` instead.
-
-This single command:
-
-1. Writes `.gitignore` and `README.md`, runs `git init`, makes the initial commit.
-2. Creates the private GitHub repo and pushes via `gh`.
-3. Installs the shared deploy library and renders the workflow file.
-4. Reuses or creates SSH keys for GitHub and the server.
-5. Patches `~/.ssh/config` and `~/.zshrc` as needed.
-6. SSHes into the configured server and generates a project-specific deploy key.
-7. Registers the deploy key with GitHub via `gh repo deploy-key add`.
-8. Tests the server's GitHub authentication.
-9. Runs the initial deploy — cloning the repo at the server path.
-
-After this, `test6push "first change"` is the entire release flow.
+---
 
 ## CLI flags reference
 
 ### `init-project.sh` / `gdw-init`
 
 ```
---express                Auto-yes all confirmations; chains bootstrap in express mode.
+--express                Auto-yes all confirmations; chains into bootstrap in express mode.
 --dry-run                Preview every action; write nothing.
 --description <text>     One-line project description.
 --github-user <user>     GitHub username.
 --visibility <v>         Repo visibility: public or private. Default: private.
 ```
 
-All bootstrap flags listed below are also accepted and forwarded automatically when init-project chains into bootstrap.
+All bootstrap flags below are also accepted by `gdw-init` and forwarded automatically when it chains into bootstrap.
 
 ### `bootstrap-deploy.sh` / `gdw-bootstrap`
 
@@ -240,25 +322,22 @@ All bootstrap flags listed below are also accepted and forwarded automatically w
 
 ```
 --express                Auto-yes all confirmations; runs every step without pausing.
-                         In uninstall mode, the only prompt is typing the GitHub repo
-                         name to confirm deletion.
 --dry-run                Preview the plan; write nothing.
---uninstall              Remove a previous bootstrap: strips ~/.zshrc and ~/.ssh/config
-                         blocks, removes the server deploy key and project folder, and
-                         deletes the GitHub repo. Combine with --express and --prefix
-                         for a fully non-interactive teardown.
+--uninstall              Remove a previous bootstrap: strips ~/.zshrc and ~/.ssh/config blocks,
+                         removes the server deploy key and project folder, and deletes the
+                         GitHub repo. Combine with --express and --prefix for a fully
+                         non-interactive teardown (GitHub deletion still requires typing the repo name).
 ```
 
 **Project:**
 
 ```
 --prefix <p>             Command prefix (e.g. theme → themepull / themepush).
-                         In express mode, auto-derived from the project name if omitted.
 --label <l>              Human-readable project name.
 --local-path <path>      Local clone path of the project.
 --server-path <path>     Project path on the production server.
---zip-path <path>        Full output path for zip review archives.
---no-server              No-server mode: commit + push only, no deploy step.
+--zip-path <path>        Full output path for zip archives.
+--no-server              No-server mode: commit + push only, no deploy.
 ```
 
 **GitHub:**
@@ -285,139 +364,59 @@ All bootstrap flags listed below are also accepted and forwarded automatically w
 --server-remote <url>           Server-side GitHub remote URL.
 ```
 
-### Combining flags and config
-
-Flags, config, and interactive prompts stack cleanly. A field is resolved by checking each source in order and stopping at the first one that provides a value:
-
-1. CLI flag
-2. `~/.gdw-config` variable
-3. Auto-derivation (express mode only, where applicable)
-4. Interactive prompt
-
-## Modes
-
-### Server mode
-
-Use this for projects that deploy to a remote server, such as WordPress plugins, WordPress themes, static sites, or any app where deploy means "SSH into the server and pull latest main."
-
-In server mode, `<prefix>push "message"` does this:
-
-1. Confirms the local repo is on `main`.
-2. Stages all changes.
-3. Stops cleanly if there is nothing to commit.
-4. Shows the pending Git status.
-5. Creates the commit.
-6. Pushes to GitHub.
-7. SSHes into the server.
-8. Runs a fast-forward-only pull inside the configured server path.
-
-If the server path does not exist yet, the deploy command creates the parent directory and clones the repo into place. If the path exists but is not a Git repo, it refuses to overwrite it.
-
-### No-server mode
-
-Use this for libraries, scripts, private research code, or any project that does not deploy anywhere yet. `<prefix>push "message"` stages, commits, and pushes to GitHub. The deploy step is skipped automatically because no server host is configured.
-
-If you add a server later, rerun the bootstrap with the same prefix and choose `replace`.
-
-## What you get
-
-After bootstrap, your shell gets project-specific commands scoped to the prefix you chose. For prefix `acme`:
-
-| Command | What it does |
-| --- | --- |
-| `acmepull` | Pulls latest `main` from GitHub. Refuses if local edits exist. |
-| `acmepush "message"` | Stages all changes, commits, pushes to GitHub, and deploys if a server is configured. Only runs from `main`. |
-| `acmebranch <name>` | Creates a new branch from the current state. |
-| `acmerevert` | Reverts the latest `main` commit after explicit `YES` confirmation, pushes the revert, and redeploys. |
-| `acmestatus` | Shows short Git status and the current branch. |
-| `acmezip` | Builds a clean ZIP from the current Git commit using `git archive`. |
-| `deploy-acme` | Runs only the deploy step (server `git pull` or clone). |
-| `acmehelp` | Shows the command list and configured paths. |
-| `gdw-list` | Lists every bootstrapped project found in `~/.zshrc`. |
-
-## Daily use
-
-Start clean:
-
-```sh
-acmepull
-```
-
-Make changes, then commit, push, and deploy:
-
-```sh
-acmepush "fix: stop double-encoding URLs"
-```
-
-Check status:
-
-```sh
-acmestatus
-```
-
-Create a branch for work that should not deploy immediately:
-
-```sh
-acmebranch refactor/cache-helpers
-git push -u origin refactor/cache-helpers
-```
-
-Build a clean review ZIP:
-
-```sh
-acmezip
-```
-
-Revert the latest `main` commit and redeploy:
-
-```sh
-acmerevert
-```
+---
 
 ## Safety and idempotence
 
 The bootstrap is designed to be safe to rerun.
 
-- **Dry run support.** Use `--dry-run` to preview changes before writing anything.
-- **Prefix conflict detection.** If the chosen prefix already exists, the bootstrap asks whether to replace the previous setup or abort. In express mode, it auto-replaces.
-- **Backups before mutation.** `~/.zshrc` and `~/.ssh/config` are copied to timestamped `.bak.YYYYMMDD-HHMMSS` files before modification.
-- **Marker blocks.** All generated shell and SSH config blocks are wrapped in prefix-specific marker comments so they can be cleanly stripped by `--uninstall`.
+- **Dry run.** Use `--dry-run` to preview every change before writing anything.
+- **Prefix conflict detection.** If the chosen prefix already exists, the bootstrap asks whether to replace or abort. In express mode, it auto-replaces.
+- **Backups before any change.** `~/.zshrc` and `~/.ssh/config` are copied to timestamped `.bak.YYYYMMDD-HHMMSS` files before modification.
+- **Marker blocks.** All generated config blocks are wrapped in prefix-specific markers so they can be cleanly removed by `--uninstall`.
 - **Existing SSH config reuse.** If a matching `Host` block already exists, the bootstrap reads it instead of duplicating it.
-- **SSH keys are not overwritten.** Existing keys at the selected paths are reused. Only missing keys are created.
+- **SSH keys are never overwritten.** Existing keys are reused. Only missing keys are created.
 - **Main-branch guard.** `<prefix>push` and `<prefix>revert` only run from `main`.
-- **Dirty-tree guard.** Pull and revert commands refuse to continue if local changes or untracked files are present.
-- **Fast-forward-only deploy.** Server deploys use `git pull --ff-only`, preventing silent merge commits on the server.
+- **Dirty-tree guard.** Pull and revert refuse to continue if local changes or untracked files are present.
+- **Fast-forward-only deploys.** Server deploys use `git pull --ff-only`, preventing silent merge commits on the server.
 - **Server overwrite guard.** If the server path exists but is not a Git repo, deploy refuses to touch it.
+
+---
 
 ## What the bootstrap does
 
-Running `bootstrap-deploy.sh` (or `gdw-bootstrap`) on your laptop does the following:
+Running `bootstrap-deploy.sh` on your laptop does the following:
 
-1. Collects project settings from CLI flags, `~/.gdw-config`, and interactive prompts as needed.
-2. Installs the shared library at `~/.git-deploy-lib.zsh`.
-3. Renders a small per-project workflow file at `~/.<prefix>-workflow.zsh`.
-4. Adds one `source` block to `~/.zshrc`.
-5. Reuses or creates the local GitHub SSH key.
-6. In server mode, reuses or creates the server SSH key.
-7. Patches `~/.ssh/config` only for host blocks that do not already exist.
-8. In server mode, runs the server-side setup (see below).
-9. Adds a `gdw-bootstrap` convenience alias on first run.
-10. Offers to run `deploy-<prefix>` immediately to do the initial server-side clone.
+1. Checks that `gh` is installed and signed in. If not, explains what you'll need to do manually.
+2. Collects project settings — name, command prefix (auto-derived from the directory name, editable), and optional server details.
+3. Offers a one-question "use default SSH settings?" shortcut so most users never see the individual hostname and key-path prompts.
+4. Shows the full plan and asks for confirmation before writing anything.
+5. Installs the shared library at `~/.git-deploy-lib.zsh`.
+6. Creates any missing SSH keys with a plain-language explanation for each: your GitHub key (named `user@hostname`, shared across all projects on this machine) and, in server mode, a per-project server access key for SSHing into your server. Existing keys are always reused.
+7. Patches `~/.ssh/config`. Normally skips any `Host` block that already exists. Exception: if a `Host github.com` block exists but has no `IdentityFile` line, the bootstrap cannot reliably bind to a specific key through it, so it adds a scoped `Host github-<prefix>` alias with an explicit `IdentityFile` instead. The existing block is always left untouched.
+8. In server mode, installs your server SSH public key into the server's `authorized_keys` via `ssh-copy-id` (one password prompt) so all remaining SSH steps — and every future deploy — are password-free.
+9. Registers the GitHub SSH key automatically (via `gh`) or walks you through the manual paste if `gh` is unavailable. After registration, tests the connection — waits automatically on the first attempt to allow for GitHub's key propagation delay.
+10. Switches the local repo's origin remote from HTTPS to SSH if needed.
+11. Pushes the initial commit if the repo was created by `gdw-init` but the SSH push was deferred because no key was set up yet.
+12. Renders a small per-project workflow file at `~/.<prefix>-workflow.zsh`.
+13. Adds one `source` block to `~/.zshrc`.
+14. Adds a `gdw-bootstrap` convenience alias on first run.
+15. In server mode, runs the server-side setup (see below).
+16. Offers to run `deploy-<prefix>` immediately to do the initial server-side clone or pull.
+17. Prints next steps — reload your shell and you're done.
 
 ### Server-side setup
 
 When server mode is active, the bootstrap SSHes into the server and:
 
 1. Generates a repo-specific deploy key without a passphrase (required for non-interactive deploys).
-2. Writes a marker-bracketed `Host github-<prefix>` block in the server's `~/.ssh/config`.
+2. Writes a `Host github-<prefix>` block in the server's `~/.ssh/config`.
 3. Attempts to register the deploy key with GitHub using `gh repo deploy-key add`. Falls back to a manual paste flow if GitHub CLI is unavailable or lacks `admin:repo_hook` scope.
 4. Tests the server's GitHub authentication through the alias.
 
-In express mode, all confirmations in this flow are answered automatically and the test runs once.
+If you skipped the interactive setup, the next-steps output prints the exact manual commands to complete it yourself.
 
-### Initial deploy
-
-At the end of bootstrap, the script offers to run `deploy-<prefix>` immediately. This SSHes into the server and either clones the repo if the server path does not exist yet, or pulls the latest `main` if it does. In express mode this runs automatically.
+---
 
 ## New-project scaffolding (`gdw-init`)
 
@@ -431,33 +430,25 @@ gdw-init
 
 It does the following:
 
-1. Uses the current directory name as both the project name and the GitHub repo name.
-2. Prompts for a one-line description (or takes it from `--description`).
-3. Detects your GitHub username from `gh`, global Git config, or `~/.gdw-config`.
-4. Writes a starter `.gitignore` and `README.md`.
-5. Runs `git init -b main`, stages everything, and makes the initial commit.
-6. Creates and pushes the GitHub repo with `gh` when authenticated; otherwise prints the manual steps.
-7. Adds the `gdw-init` convenience alias to `~/.zshrc` on first run.
-8. Chains directly into `bootstrap-deploy.sh`, passing the confirmed project path so bootstrap does not ask for it again.
+1. Checks that `gh` is installed and signed in. If `gh` is present but not authenticated, it explains what you'll need to do manually and offers to continue or exit so you can run `gh auth login` first.
+2. Uses the current directory name as the project name and GitHub repo name.
+3. Prompts for a one-line description (or takes it from `--description`).
+4. Detects your GitHub username from `gh`, global Git config, or `~/.gdw-config`.
+5. Writes a starter `.gitignore` and `README.md`.
+6. Runs `git init -b main`, stages everything, and makes the initial commit.
+7. Creates the GitHub repo via `gh` and pushes the initial commit. If no SSH key is set up yet (fresh machine), the push is deferred — bootstrap handles it automatically in the next step after setting up the key. If `gh` is unavailable, prints the manual steps.
+8. Adds the `gdw-init` alias to `~/.zshrc` on first run.
+9. Chains directly into `bootstrap-deploy.sh` with the confirmed project path.
 
-### Express scaffolding
-
-With `~/.gdw-config` populated, the full scaffold-to-deploy flow is a single command:
-
-```sh
-mkdir my-plugin && cd my-plugin
-gdw-init --express \
-  --description "My WordPress plugin" \
-  --server-path /home/user/public_html/wp-content/plugins/my-plugin
-```
-
-All bootstrap flags (`--prefix`, `--ssh-host`, `--server-remote`, etc.) are accepted by `gdw-init` and forwarded automatically when it chains into bootstrap.
+All bootstrap flags (`--prefix`, `--ssh-host`, `--server-remote`, etc.) are accepted by `gdw-init` and forwarded automatically.
 
 ### Preview with dry run
 
 ```sh
 gdw-init --dry-run
 ```
+
+---
 
 ## Architecture
 
@@ -472,7 +463,7 @@ After bootstrapping projects named `acme`, `widgetco`, and `theme`, your home di
 ~/.theme-workflow.zsh      # project context + wrappers
 ```
 
-The shared library defines generic functions such as `_gdw_pull`, `_gdw_push`, `_gdw_revert`, `_gdw_zip`, and `_gdw_deploy`. Each per-project workflow file sets the project-specific context variables and then exposes the friendly command names.
+The shared library defines generic functions (`_gdw_pull`, `_gdw_push`, `_gdw_deploy`, etc.). Each per-project file sets the context variables and exposes the friendly command names:
 
 ```zsh
 _acme_ctx() {
@@ -480,21 +471,23 @@ _acme_ctx() {
   GDW_LABEL="Acme Plugin"
   GDW_REPO="$HOME/Code/acme"
   GDW_SSH_HOST="myserver"
-  GDW_SERVER_PATH='$HOME/wp-content/plugins/acme'
+  GDW_SERVER_PATH="$HOME/wp-content/plugins/acme"
   GDW_ZIP_OUTPUT="$HOME/Downloads/acme-review.zip"
   GDW_SERVER_REMOTE="git@github-acme:joeseverino/acme.git"
 }
 
-acmepull()   { _acme_ctx; _gdw_pull "$@"; }
-acmepush()   { _acme_ctx; _gdw_push "$@"; }
+acmepull()    { _acme_ctx; _gdw_pull "$@"; }
+acmepush()    { _acme_ctx; _gdw_push "$@"; }
 deploy-acme() { _acme_ctx; _gdw_deploy "$@"; }
 ```
 
-The bootstrap installs or updates the shared library on each run. Improvements to `git-deploy-lib.zsh` propagate to all bootstrapped projects by rerunning the bootstrap.
+Improvements to `git-deploy-lib.zsh` propagate to all projects by rerunning bootstrap.
+
+---
 
 ## Multiple projects
 
-Each project uses its own prefix, workflow file, SSH config markers, and optional server-side GitHub alias. Projects do not interfere with each other.
+Each project uses its own prefix, workflow file, and SSH config markers. Projects do not interfere with each other.
 
 ```sh
 gdw-bootstrap --prefix acme    # → acmepush
@@ -504,15 +497,7 @@ gdw-bootstrap --prefix blog    # → blogpush
 
 `gdw-list` shows all bootstrapped projects currently sourced from `~/.zshrc`.
 
-## Manual setup
-
-The bootstrap is the normal path, but the workflow can be wired manually.
-
-1. Copy the library: `cp git-deploy-lib.zsh ~/.git-deploy-lib.zsh`
-2. Copy the template: `cp git-deploy-workflow.zsh ~/.acme-workflow.zsh`
-3. Edit the project variables in the copied file.
-4. Add `source "$HOME/.acme-workflow.zsh"` to `~/.zshrc`.
-5. Reload: `exec zsh`
+---
 
 ## Uninstalling
 
@@ -520,56 +505,67 @@ The bootstrap is the normal path, but the workflow can be wired manually.
 gdw-bootstrap --uninstall
 ```
 
-The uninstall flow asks which prefix to remove, then strips that prefix's marker blocks from `~/.zshrc` and `~/.ssh/config`. Backups are made before any modification.
+The uninstall flow asks which prefix to remove, then:
 
-After the local cleanup, the uninstaller reads the project's workflow file to find the server and GitHub details and offers three additional steps:
-
-**Remove the server-side deploy key.** SSHes into the server and deletes `~/.ssh/<prefix>_github_deploy` (and the `.pub`) and strips the `Host github-<prefix>` block from the server's `~/.ssh/config`.
-
-**Delete the project folder on the server.** Prompts with the full path, then runs `rm -rf` on the server project directory.
-
-**Delete the GitHub repository.** Prompts you to type the full repo name (`owner/repo`) to confirm — GitHub-style — then runs `gh repo delete --yes`.
+1. Strips that prefix's marker blocks from `~/.zshrc` and `~/.ssh/config` (backups made first).
+2. Offers to SSH into the server and remove the deploy key and `Host github-<prefix>` alias.
+3. Offers to delete the project folder on the server (`rm -rf`). Prompts twice to confirm.
+4. Offers to delete the GitHub repository — you must type the full repo name (`owner/repo`) to confirm, GitHub-style. This gate is always interactive regardless of express mode.
 
 Local SSH keys are never touched. The uninstaller prints the exact `rm` commands for the workflow file and shared library if you want to clean those up manually.
 
 ### Express uninstall
 
-Pass `--express` to auto-answer every confirmation. The only prompt that remains is typing the GitHub repo name to confirm deletion — that gate is always interactive regardless of express mode.
-
-Pass `--prefix` to skip even the prefix prompt, making the entire uninstall non-interactive up until the repo name confirmation:
-
 ```sh
 gdw-bootstrap --uninstall --express --prefix theme
 ```
+
+Auto-answers every prompt. The only manual step is typing the GitHub repo name to confirm deletion.
+
+---
+
+## Manual setup
+
+The bootstrap is the normal path, but the workflow can be wired by hand:
+
+1. Copy the library: `cp git-deploy-lib.zsh ~/.git-deploy-lib.zsh`
+2. Copy the template: `cp git-deploy-workflow.zsh ~/.acme-workflow.zsh`
+3. Edit the project variables in the copied file.
+4. Add `source "$HOME/.acme-workflow.zsh"` to `~/.zshrc`.
+5. Reload: `exec zsh`
+
+---
 
 ## Project structure
 
 ```text
 zsh-git-deploy-workflow/
-├── bootstrap-deploy.sh       # Interactive installer and uninstaller
+├── bootstrap-deploy.sh       # Installer and uninstaller
 ├── git-deploy-lib.zsh        # Shared workflow logic
 ├── git-deploy-workflow.zsh   # Per-project workflow template
 ├── init-project.sh           # New-project scaffolder
+├── gdw-test-reset.sh         # Test utility — undoes everything bootstrap + init created
 ├── .gdw-config.example       # User defaults template → copy to ~/.gdw-config
 ├── README.md
 ├── LICENSE
 └── .gitignore
 ```
 
+---
+
 ## Security model
 
-This tool manages SSH-based Git workflows, so the boundaries matter.
-
 - **Separate keys per concern.** Local GitHub access, server SSH access, and server-side GitHub deploy access each use their own key.
-- **Read-only server deploy key.** The server-side GitHub key is registered as a read-only deploy key — the server can clone and pull but cannot push back.
-- **Repo-specific server aliases.** Each repo on the server uses a unique SSH alias (e.g. `github-acme`) rather than a shared `Host github.com` override, so each can carry its own deploy key independently.
-- **No passphrase on deploy keys.** Server-side deploy keys are generated without a passphrase so deploys run non-interactively. The security tradeoff is acceptable because these keys are read-only and owned by the server's user account (chmod 600).
+- **Read-only server deploy key.** The server-side GitHub key is registered as a deploy key with no write access — the server can clone and pull but cannot push.
+- **Repo-specific server aliases.** Each repo on the server uses a unique SSH alias (e.g. `github-acme`) so each can carry its own deploy key independently.
+- **Passphrase guidance per key type.** Your GitHub key and server access key can have a passphrase — ssh-agent caches it so you only type it once per session. Server-side deploy keys must have no passphrase because the server runs `git pull` non-interactively; a passphrase would cause it to hang.
 - **`IdentitiesOnly yes`.** Every generated SSH block forces SSH to offer only the configured key for that host.
-- **macOS Keychain integration.** macOS SSH blocks include `UseKeychain yes` and `AddKeysToAgent yes`. Linux blocks omit `UseKeychain` because it is a macOS-specific directive.
+- **macOS Keychain integration.** macOS SSH blocks include `UseKeychain yes` and `AddKeysToAgent yes`. Linux blocks omit `UseKeychain` because it is a macOS-only directive.
 - **No private keys in the repo.** Keys stay in `~/.ssh` on the machines that use them.
-- **No signing access on the server.** The server only needs pull access through its deploy key. Commit signing stays local.
-- **Fast-forward-only server pulls.** Deploy uses `git pull --ff-only` so the server never creates surprise merge commits.
-- **Backups before config changes.** Shell and SSH config files are backed up before marker blocks are written or edited.
+- **Fast-forward-only server pulls.** Deploys use `git pull --ff-only` so the server never silently creates merge commits.
+- **Backups before config changes.** Shell and SSH config files are backed up before any marker block is written or modified.
+
+---
 
 ## Troubleshooting
 
@@ -579,57 +575,117 @@ You have uncommitted or untracked files. Check with `<prefix>status`, then commi
 
 ### `<prefix>push` refuses because I am not on `main`
 
-Expected. `<prefix>push` is the release path and only runs from `main`. For branch work, use plain Git commands and push the branch to GitHub for review.
+Expected. `<prefix>push` is the release path and only runs from `main`. For branch work, push with plain `git push -u origin <branch>`.
 
 ### `deploy-<prefix>` fails with permission denied
 
-The server may not have working GitHub deploy-key access. Test from your laptop through the server:
+The server may not have working GitHub deploy-key access. Test it from your laptop:
 
 ```sh
 ssh <your-server-alias> "ssh -T git@github-<prefix>"
 ```
 
-Expected output: `Hi you/repo! You've successfully authenticated...`
+Expected: `Hi you/repo! You've successfully authenticated...`
 
-If that fails, the deploy key may not be registered, the key file path in the server's `~/.ssh/config` may be wrong, or the key's permissions may be too open (`chmod 600` the key file on the server).
+If that fails, the deploy key may not be registered, the path in the server's `~/.ssh/config` may be wrong, or the key permissions may be too open (`chmod 600` the key file on the server).
 
-### Server pull fails with merge conflicts or non-fast-forward error
+### Server pull fails with a non-fast-forward error
 
-The server has diverged from `main`. SSH in, inspect with `git status` and `git log`, resolve the state manually, then rerun the deploy command.
+The server's repo has diverged from `main`. SSH in, inspect with `git status` and `git log`, resolve the state manually, then rerun deploy.
 
 ### `<prefix>push` hangs
 
-Usually an SSH prompt, network issue, or key-agent issue. Test each link:
+Usually an SSH prompt, network issue, or key-agent problem. Test each link in sequence:
 
 ```sh
-ssh -T git@github.com                          # local GitHub key
-ssh <your-server-alias> "echo ok"              # server SSH
-ssh <your-server-alias> "ssh -T git@github-<prefix>"  # server deploy key
+ssh -T git@github.com                                          # local GitHub key
+ssh <your-server-alias> "echo ok"                              # server SSH
+ssh <your-server-alias> "ssh -T git@github-<prefix>"          # server deploy key
 ```
 
 ### Express mode still asked me something
 
-Express mode auto-derives everything it can, but a few fields require actual input when they cannot be guessed:
+Express mode auto-derives everything it can. A few fields have no universal default:
 
-- **Server hostname** — if your `--ssh-host` alias does not exist in `~/.ssh/config` yet, the real hostname cannot be guessed. Pass `--ssh-hostname` to eliminate this prompt.
-- **Prefix** — auto-derived from the directory name in express mode. Pass `--prefix` explicitly if you want a specific name.
-- **Server path** — the only project-specific field with no reasonable universal default. Pass `--server-path`.
+- **Server hostname** — if your `--ssh-host` alias does not exist in `~/.ssh/config`, the hostname cannot be guessed. Pass `--ssh-hostname` to eliminate this prompt.
+- **Server path** — the only project-specific field that cannot be derived. Pass `--server-path`.
+- **Prefix** — auto-derived from the directory name. Pass `--prefix` for something shorter.
 
-Setting `GDW_DEFAULT_SSH_HOST` in `~/.gdw-config` to an alias that already exists in `~/.ssh/config` is the most effective way to get fully prompt-free express runs.
+Setting `GDW_DEFAULT_SSH_HOST` in `~/.gdw-config` to an alias that already exists in `~/.ssh/config` is the most effective way to get fully prompt-free runs.
+
+### Bootstrap asked for my server password multiple times
+
+The bootstrap SSHes into your server several times — for the deploy key setup, reading the key back, testing GitHub auth, and the initial deploy. If key-based auth isn't set up on your server yet, each connection falls back to a password prompt.
+
+The bootstrap now includes a **"Server key authentication"** step that runs `ssh-copy-id` to push your server SSH key into the server's `authorized_keys`. You enter your password once for that step, and every subsequent SSH call — including all remaining bootstrap steps and all future deploys — is password-free.
+
+If you skipped that step or it failed, you can run it manually at any time:
+
+```sh
+ssh-copy-id -i ~/.ssh/<prefix>_server <your-server-alias>
+```
+
+To confirm key auth is working:
+
+```sh
+ssh <your-server-alias> "echo ok"
+# Should print: ok — with no password prompt
+```
+
+### Bootstrap asked for my SSH key passphrase multiple times on Linux
+
+On Linux without a desktop session, `ssh-agent` may not be running, so the passphrase for your server key isn't cached between connections. Start an agent and add your key for the session:
+
+```sh
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/<prefix>_server
+```
+
+After that, SSH will reuse the cached key without re-prompting until you log out. To make this automatic on login, add those two lines to your `~/.bashrc` or `~/.zshrc`.
+
+### Bootstrap says authentication failed but `ssh -T git@github.com` works
+
+GitHub takes a few seconds to activate a newly registered key. The bootstrap waits 5 seconds automatically on the first failure and retries silently. If it still fails after 3 attempts, the bootstrap continues and your key will work shortly after. Test with:
+
+```sh
+ssh -T git@github.com
+# Expected: Hi <you>! You've successfully authenticated...
+```
+
+If that succeeds, everything is fine — your push commands will work once you reload your shell.
+
+### Bootstrap added a `Host github-<prefix>` entry even though I didn't ask for a server
+
+This happens when your existing `~/.ssh/config` already has a `Host github.com` block but it has no `IdentityFile` line — common when another tool (like 1Password SSH agent or a corporate setup) manages GitHub key selection. In that case the bootstrap can't reliably tie its workflow to a specific key through that block, so it creates a dedicated `Host github-<prefix>` alias with an explicit `IdentityFile` instead. Your existing `Host github.com` block is left completely untouched.
+
+If you'd rather not have the extra alias, add an `IdentityFile` line to your existing `Host github.com` block pointing at the key you want GDW to use, then rerun the bootstrap — it will find the key and skip creating the alias.
+
+### Bootstrap says GitHub CLI is installed but not signed in
+
+The bootstrap will offer to run `gh auth login` for you inline — just answer yes when prompted. If you prefer to sign in separately first, run `gh auth login` in your terminal, follow the prompts, then rerun the bootstrap. Either way works; signing in lets the bootstrap register your SSH key and deploy key automatically instead of walking you through the manual paste steps.
 
 ### Bootstrap says it cannot find the workflow template
 
-Run `bootstrap-deploy.sh` from the cloned workflow repo, or call it by full path so it can locate `git-deploy-lib.zsh` and `git-deploy-workflow.zsh` next to itself.
+Run `bootstrap-deploy.sh` by full path so it can find `git-deploy-lib.zsh` and `git-deploy-workflow.zsh` next to itself, or use the `gdw-bootstrap` alias which bakes in the path automatically.
 
 ### GitHub CLI deploy-key registration fails
 
-Bootstrap falls back to manual instructions. Copy the printed public key and add it in GitHub under **Repository → Settings → Deploy keys → Add deploy key**. Leave write access disabled.
-
-If you want `gh` to handle it automatically in the future, grant the required scope:
+Bootstrap falls back to manual instructions — it prints the public key and tells you exactly where to paste it in GitHub. To let `gh` handle it automatically in the future:
 
 ```sh
 gh auth refresh -s admin:repo_hook
 ```
+
+---
+
+## What this is not
+
+- **Not a CI/CD service.** There is no webhook, pipeline runner, or hosted dashboard. Deploys run from your terminal.
+- **Not for teams.** This workflow is designed for a single developer owning the full deploy path.
+- **Not a zero-downtime deployer.** Deploy is `git pull`. For blue-green deploys or rolling restarts, use a proper deploy tool.
+- **Not opinionated about your stack.** The workflow does not care whether your project is PHP, Python, Node, or static HTML. If it lives in a Git repo, this workflow can deploy it.
+
+---
 
 ## License
 

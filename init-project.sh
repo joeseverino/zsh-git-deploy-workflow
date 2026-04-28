@@ -31,6 +31,108 @@
 
 set -euo pipefail
 
+# ---------------------------------------------------------------------
+# Preflight checks
+# ---------------------------------------------------------------------
+
+_preflight_error() { echo "Error: $*" >&2; }
+
+# Hard requirements — cannot proceed without these.
+_preflight_ok=1
+for _tool in zsh git ssh ssh-keygen sed awk; do
+  if ! command -v "$_tool" >/dev/null 2>&1; then
+    _preflight_error "$_tool is required but not installed."
+    case "$_tool" in
+      zsh)            echo "  Ubuntu/Debian:  sudo apt-get install zsh" >&2 ;;
+      git)            echo "  Ubuntu/Debian:  sudo apt-get install git" >&2 ;;
+      ssh|ssh-keygen) echo "  Ubuntu/Debian:  sudo apt-get install openssh-client" >&2 ;;
+      sed|awk)        echo "  Ubuntu/Debian:  sudo apt-get install sed gawk" >&2 ;;
+    esac
+    _preflight_ok=0
+  fi
+done
+[ "$_preflight_ok" -eq 0 ] && exit 1
+
+# GitHub CLI — optional but strongly recommended.
+if ! command -v gh >/dev/null 2>&1; then
+  echo "" >&2
+  echo "  ┌─ GitHub CLI (gh) not found ──────────────────────────────────────┐" >&2
+  echo "  │  Without it, these steps require manual action:                  │" >&2
+  echo "  │    • Creating the GitHub repo (you'll do it on github.com)       │" >&2
+  echo "  │    • Registering your SSH key at github.com/settings/keys        │" >&2
+  echo "  │    • Adding the server deploy key to your GitHub repo            │" >&2
+  echo "  │                                                                  │" >&2
+  echo "  │  Install: https://github.com/cli/cli#installation                │" >&2
+  echo "  │  Ubuntu:  see above link — needs the gh apt repo added first     │" >&2
+  echo "  │  macOS:   brew install gh                                        │" >&2
+  echo "  └──────────────────────────────────────────────────────────────────┘" >&2
+  echo "" >&2
+  printf '  Continue without gh? [Y/n]: '
+  read -r _gh_ans
+  case "$(printf '%s' "${_gh_ans:-y}" | tr '[:upper:]' '[:lower:]')" in
+    n|no) echo "Install gh, then rerun." >&2; exit 0 ;;
+  esac
+fi
+
+# gh is installed — check that the user is actually signed in.
+# An unauthenticated gh is worse than no gh: it silently skips auto-registration
+# and leaves the user staring at a manual step with no explanation.
+if command -v gh >/dev/null 2>&1 && ! gh auth token >/dev/null 2>&1; then
+  echo "" >&2
+  echo "  ┌─ GitHub CLI (gh) found but not signed in ────────────────────────┐" >&2
+  echo "  │  gh is installed but you haven't authenticated it yet.           │" >&2
+  echo "  │                                                                  │" >&2
+  echo "  │  Signing in lets this script create your GitHub repo and push    │" >&2
+  echo "  │  automatically. Without it you'll do those steps manually.       │" >&2
+  echo "  └──────────────────────────────────────────────────────────────────┘" >&2
+  echo "" >&2
+  printf '  Sign in to GitHub CLI now? [Y/n]: '
+  read -r _gh_auth_ans
+  case "$(printf '%s' "${_gh_auth_ans:-y}" | tr '[:upper:]' '[:lower:]')" in
+    y|yes|'')
+      gh auth login
+      # Verify it worked before continuing.
+      if ! gh auth token >/dev/null 2>&1; then
+        echo "" >&2
+        echo "  gh auth login did not complete successfully." >&2
+        echo "  Continuing without gh — repo creation will be manual." >&2
+        echo "" >&2
+      else
+        echo "" >&2
+        echo "  Signed in. Continuing..." >&2
+        echo "" >&2
+      fi
+      ;;
+    *)
+      echo "" >&2
+      echo "  Continuing without gh — repo creation will be a manual step." >&2
+      echo "" >&2
+      ;;
+  esac
+fi
+
+# git identity — required for git commit.
+_git_name="$(git config --global user.name 2>/dev/null || true)"
+_git_email="$(git config --global user.email 2>/dev/null || true)"
+if [ -z "$_git_name" ] || [ -z "$_git_email" ]; then
+  echo "" >&2
+  echo "  ┌─ git identity not configured ────────────────────────────────────┐" >&2
+  echo "  │  git needs your name and email to make commits.                  │" >&2
+  echo "  └──────────────────────────────────────────────────────────────────┘" >&2
+  echo "" >&2
+  if [ -z "$_git_name" ]; then
+    printf '  Your name (for git commits): '
+    read -r _git_name
+    git config --global user.name "$_git_name"
+  fi
+  if [ -z "$_git_email" ]; then
+    printf '  Your email (for git commits): '
+    read -r _git_email
+    git config --global user.email "$_git_email"
+  fi
+  echo ""
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/init-project.sh"
 BOOTSTRAP="$SCRIPT_DIR/bootstrap-deploy.sh"
@@ -175,7 +277,7 @@ EOF
 # Echoes "<username>|<source>" so the caller can tell the user where the
 # default came from. Source is one of: gh-cli / git-config / none.
 detect_github_username() {
-  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
     local user
     user="$(gh api user -q .login 2>/dev/null || true)"
     if [ -n "$user" ]; then
@@ -423,7 +525,7 @@ ok "  Initial commit made on main"
 
 section "GitHub repo"
 HAS_GH=0
-if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
   HAS_GH=1
 fi
 
@@ -447,22 +549,33 @@ if [ "$HAS_GH" -eq 1 ]; then
 
       # Brief pause so SSH access has time to propagate, then push.
       # Retry once on the off chance the first attempt is too eager.
+      # Capture stderr so we can distinguish auth failures from lag.
       sleep 2
-      if git push -u origin main >/dev/null 2>&1; then
+      _push_out=""
+      _push_ok=0
+      if _push_out="$(git push -u origin main 2>&1)"; then
         ok "  Pushed initial commit on main."
         REPO_PUSHED=1
+        _push_ok=1
       else
         sleep 3
-        if git push -u origin main >/dev/null 2>&1; then
+        if _push_out="$(git push -u origin main 2>&1)"; then
           ok "  Pushed initial commit on main (after retry)."
           REPO_PUSHED=1
+          _push_ok=1
+        fi
+      fi
+      if [ "$_push_ok" -eq 0 ]; then
+        REPO_PUSHED=0
+        if printf '%s' "$_push_out" | grep -qi "permission denied\|publickey\|authentication"; then
+          warn "  Push failed — no SSH key is registered with GitHub yet."
+          info "  That's normal on a fresh machine. The deploy workflow setup"
+          info "  (offered below) will create your key and register it."
+          info "  Afterward, run:  git push -u origin main"
         else
           warn "  Repo was created but the push failed twice."
           warn "  This is usually GitHub's SSH propagation lag — wait 5-10 seconds and run:"
           echo "    git push -u origin main"
-          # Leave REPO_PUSHED=0 so the final summary honestly says "not pushed"
-          # and the user can see they need to retry. The repo + remote exist.
-          REPO_PUSHED=0
         fi
       fi
     else
@@ -502,7 +615,8 @@ EOF
          git push -u origin main
 
   Or install the GitHub CLI to skip this step next time:
-    brew install gh && gh auth login
+    https://cli.github.com  (Ubuntu: sudo apt-get install gh)
+    Then: gh auth login
 EOF
   fi
 fi

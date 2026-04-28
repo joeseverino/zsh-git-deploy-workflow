@@ -34,6 +34,13 @@ _gdw_ok()   { printf "\033[32m%s\033[0m\n" "$1"; }
 _gdw_err()  { printf "\033[31m%s\033[0m\n" "$1"; }
 _gdw_warn() { printf "\033[33m%s\033[0m\n" "$1"; }
 
+# Shell-safe single-quoting for values embedded in remote SSH commands.
+# Wraps $1 in single quotes, escaping any embedded single quotes as '\''
+# (the POSIX portable approach). Mirrors _sq() in bootstrap-deploy.sh.
+_gdw_sq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"
+}
+
 
 # ------------------------------------------------------------
 # State checks
@@ -123,12 +130,20 @@ _gdw_deploy() {
     return 1
   fi
 
+  # Pre-escape both values for safe embedding in the remote command string.
+  # GDW_SERVER_PATH and remote_url are user-supplied and may contain single
+  # quotes; _gdw_sq() wraps them so the remote shell always parses correctly.
+  local server_path_sq remote_url_sq
+  server_path_sq="$(_gdw_sq "$GDW_SERVER_PATH")"
+  remote_url_sq="$(_gdw_sq "$remote_url")"
+
+  echo ""
   echo "Deploying to server..."
 
   if ssh "$GDW_SSH_HOST" "
     set -e
-    server_path='$GDW_SERVER_PATH'
-    remote_url='$remote_url'
+    server_path=${server_path_sq}
+    remote_url=${remote_url_sq}
     if [ ! -d \"\$server_path\" ]; then
       echo \"Server path does not exist. Creating parent directory and cloning...\"
       mkdir -p \"\$(dirname \"\$server_path\")\"
@@ -151,6 +166,7 @@ _gdw_deploy() {
     git pull --ff-only
   "; then
     _gdw_ok "Deployment successful."
+    echo ""
   else
     _gdw_err "Deployment failed. Check server path, Git status, or deploy key access."
     return 1
@@ -185,7 +201,7 @@ _gdw_push() {
 
   git status --short
   git commit -m "$1" || return 1
-  git push || return 1
+  git push -u origin main || return 1
   _gdw_deploy
 }
 
@@ -225,7 +241,7 @@ _gdw_revert() {
   fi
 
   git revert --no-edit HEAD || return 1
-  git push || return 1
+  git push -u origin main || return 1
   _gdw_deploy
 }
 
@@ -283,9 +299,15 @@ gdw-list() {
     [ -z "$prefix" ] && continue
     wf="$HOME/.${prefix}-workflow.zsh"
     if [ -f "$wf" ]; then
-      label="$(grep -E '^[[:space:]]*GDW_LABEL=' "$wf" | sed -E 's/.*="(.*)"/\1/' | head -1)"
-      repo="$(grep -E '^[[:space:]]*GDW_REPO=' "$wf" | sed -E 's/.*="(.*)"/\1/' | head -1)"
-      host="$(grep -E '^[[:space:]]*GDW_SSH_HOST=' "$wf" | sed -E 's/.*="(.*)"/\1/' | head -1)"
+      # Strip KEY= prefix then leading/trailing quote. Handles both the
+      # single-quoted format written by current bootstrap ('value') and
+      # the double-quoted format written by older versions ("value").
+      label="$(grep -E '^[[:space:]]*GDW_LABEL=' "$wf" \
+        | sed -E "s/^[[:space:]]*GDW_LABEL=//;s/^['\"]//;s/['\"][^'\"]*$//" | head -1)"
+      repo="$(grep -E '^[[:space:]]*GDW_REPO=' "$wf" \
+        | sed -E "s/^[[:space:]]*GDW_REPO=//;s/^['\"]//;s/['\"][^'\"]*$//" | head -1)"
+      host="$(grep -E '^[[:space:]]*GDW_SSH_HOST=' "$wf" \
+        | sed -E "s/^[[:space:]]*GDW_SSH_HOST=//;s/^['\"]//;s/['\"][^'\"]*$//" | head -1)"
       printf '  \033[1m%-12s\033[0m %s\n' "$prefix" "${label:-(no label)}"
       printf '  %-12s repo:    %s\n' '' "${repo:-(unknown)}"
       if [ -n "$host" ]; then
