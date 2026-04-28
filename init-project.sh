@@ -50,6 +50,15 @@ GDW_CONFIG="$HOME/.gdw-config"
 [ -f "$GDW_CONFIG" ] && . "$GDW_CONFIG"
 
 DRY_RUN=0
+INIT_EXPRESS=0
+
+# CLI-provided values for init-project itself.
+CLI_DESCRIPTION=""
+CLI_GH_USER=""
+CLI_VISIBILITY=""
+
+# Flags to forward verbatim to bootstrap-deploy.sh.
+BOOTSTRAP_PASSTHROUGH=()
 
 
 # ---------------------------------------------------------------------
@@ -86,6 +95,10 @@ ask() {
 }
 
 confirm() {
+  if [ "$INIT_EXPRESS" -eq 1 ]; then
+    printf '  %s [Y/n]: Y  (express)\n' "$1"
+    return 0
+  fi
   local raw=""
   read -r -p "  $1 [Y/n]: " raw
   case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
@@ -189,10 +202,35 @@ usage() {
 init-project.sh — scaffold a new project ready for GitHub.
 
 Usage:
-  cd <empty-or-new-dir>
-  bash init-project.sh           # interactive
-  bash init-project.sh --dry-run # preview without writing
-  bash init-project.sh --help
+  cd <new-dir>
+  bash init-project.sh [options]
+
+Modes:
+  (default)              Interactive scaffold.
+  --dry-run              Preview every action; write nothing.
+  --express              Auto-yes all confirmations; chains into bootstrap in express mode.
+
+Project flags:
+  --description <text>   One-line project description
+  --github-user <user>   GitHub username
+  --visibility <v>       Repo visibility: public or private  (default: private)
+
+Bootstrap flags (passed through to bootstrap-deploy.sh when chaining):
+  --prefix <p>           Command prefix for the deploy workflow
+  --server-path <path>   Project path on the production server
+  --zip-path <path>      Full path for zip review archives
+  --no-server            No-server mode (commit + push only)
+  --github-host <host>   GitHub SSH hostname
+  --github-key <path>    Local GitHub SSH key path
+  --ssh-host <alias>     Server SSH host alias
+  --ssh-hostname <host>  Server hostname or IP
+  --ssh-user <user>      Server SSH user
+  --ssh-port <port>      Server SSH port
+  --server-key <path>    Server SSH key path
+  --server-github-alias <alias>   Server-side GitHub SSH alias
+  --server-remote <url>  Server-side GitHub remote URL
+
+  --help, -h             Show this message.
 
 The directory name becomes the project name AND the GitHub repo name.
 Run this once and a 'gdw-init' alias is added to your ~/.zshrc so
@@ -202,9 +240,20 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dry-run)  DRY_RUN=1 ;;
-    --help|-h)  usage; exit 0 ;;
-    *)          err "Unknown option: $1"; usage; exit 2 ;;
+    --dry-run)       DRY_RUN=1 ;;
+    --express)       INIT_EXPRESS=1 ;;
+    --description)   shift; CLI_DESCRIPTION="${1:-}" ;;
+    --github-user)   shift; CLI_GH_USER="${1:-}" ;;
+    --visibility)    shift; CLI_VISIBILITY="${1:-}" ;;
+    # Bootstrap flags — collect and forward.
+    --prefix|--server-path|--zip-path|--github-host|--github-key|\
+    --ssh-host|--ssh-hostname|--ssh-user|--ssh-port|--server-key|\
+    --server-github-alias|--server-remote|--local-path|--label)
+      BOOTSTRAP_PASSTHROUGH+=("$1" "${2:-}"); shift ;;
+    --no-server)
+      BOOTSTRAP_PASSTHROUGH+=("--no-server") ;;
+    --help|-h)       usage; exit 0 ;;
+    *)               err "Unknown option: $1"; usage; exit 2 ;;
   esac
   shift
 done
@@ -246,10 +295,18 @@ section "Project info"
 plan "Project name:   $PROJECT_NAME    (from current directory)"
 plan "GitHub repo:    $GH_REPO         (same — easy to remember)"
 echo
-PROJECT_DESC="$(ask 'One-line description' "A new ${PROJECT_NAME} project.")"
+if [ -n "$CLI_DESCRIPTION" ]; then
+  PROJECT_DESC="$CLI_DESCRIPTION"
+  ok "  Description: $PROJECT_DESC  (--description)"
+else
+  PROJECT_DESC="$(ask 'One-line description' "A new ${PROJECT_NAME} project.")"
+fi
 
 section "GitHub"
-if [ -n "${GDW_DEFAULT_GH_USER:-}" ]; then
+if [ -n "$CLI_GH_USER" ]; then
+  GH_USER="$CLI_GH_USER"
+  ok "  GitHub username: $GH_USER  (--github-user)"
+elif [ -n "${GDW_DEFAULT_GH_USER:-}" ]; then
   GH_USER="$GDW_DEFAULT_GH_USER"
   ok "  Using GitHub username from ~/.gdw-config: $GH_USER"
 else
@@ -270,7 +327,10 @@ else
   fi
 fi
 
-if [ -n "${GDW_DEFAULT_GH_VISIBILITY:-}" ]; then
+if [ -n "$CLI_VISIBILITY" ]; then
+  GH_VISIBILITY="$CLI_VISIBILITY"
+  ok "  Visibility: $GH_VISIBILITY  (--visibility)"
+elif [ -n "${GDW_DEFAULT_GH_VISIBILITY:-}" ]; then
   GH_VISIBILITY="$GDW_DEFAULT_GH_VISIBILITY"
   ok "  Using visibility from ~/.gdw-config: $GH_VISIBILITY"
 else
@@ -381,7 +441,7 @@ if [ "$HAS_GH" -eq 1 ]; then
     # repo creation and push, but GitHub sometimes needs a beat after
     # creation before SSH access works — without a pause the push can
     # fail with "Repository not found" even though the repo exists.
-    if gh repo create "${GH_USER}/${GH_REPO}" $vis_flag --source=. --description "$PROJECT_DESC" >/dev/null 2>&1; then
+    if gh repo create "${GH_USER}/${GH_REPO}" "$vis_flag" --source=. --description "$PROJECT_DESC" >/dev/null 2>&1; then
       ok "  Repo created on GitHub: https://github.com/${GH_USER}/${GH_REPO}"
       REPO_CREATED=1
 
@@ -478,7 +538,6 @@ fi
 # Optionally chain into the deploy bootstrap
 # ---------------------------------------------------------------------
 
-CHAINED=0
 if [ -f "$BOOTSTRAP" ]; then
   echo
   section "Deploy workflow"
@@ -486,8 +545,13 @@ if [ -f "$BOOTSTRAP" ]; then
   info "  (Sets up SSH keys, deploy key on the server, and gives you"
   info "   <prefix>pull/<prefix>push commands you can run from anywhere.)"
   if confirm "  Run bootstrap-deploy.sh now?"; then
-    CHAINED=1
-    exec bash "$BOOTSTRAP"
+    # Pass --from-init so bootstrap skips the local clone path prompt
+    # (it was already confirmed here). Forward --express and any other
+    # bootstrap flags collected from the command line.
+    bootstrap_args=("--from-init" "$PROJECT_DIR")
+    [ "$INIT_EXPRESS" -eq 1 ] && bootstrap_args+=("--express")
+    bootstrap_args+=("${BOOTSTRAP_PASSTHROUGH[@]}")
+    exec bash "$BOOTSTRAP" "${bootstrap_args[@]}"
   fi
 fi
 

@@ -56,9 +56,12 @@ SSH_CONFIG="$HOME/.ssh/config"
 # implicit answers and the corresponding prompts are skipped.
 #
 # Supported variables:
-#   GDW_DEFAULT_GH_USER         e.g. "joeseverino"
-#   GDW_DEFAULT_GH_VISIBILITY   "public" or "private"
-#   GDW_DEFAULT_SSH_HOST        e.g. "jseverino.net"
+#   GDW_DEFAULT_GH_USER                e.g. "joeseverino"
+#   GDW_DEFAULT_GH_VISIBILITY          "public" or "private"
+#   GDW_DEFAULT_SSH_HOST               e.g. "jseverino.net"
+#   GDW_DEFAULT_GITHUB_HOST            e.g. "github.com"
+#   GDW_DEFAULT_ZIP_DIR                e.g. "$HOME/Downloads"
+#   GDW_DEFAULT_SERVER_GITHUB_ALIAS    e.g. "github-__PREFIX__"
 GDW_CONFIG="$HOME/.gdw-config"
 [ -f "$GDW_CONFIG" ] && . "$GDW_CONFIG"
 
@@ -71,6 +74,26 @@ SSH_MARK_END="# <<< __PREFIX__ deploy hosts <<<"
 
 DRY_RUN=0
 UNINSTALL=0
+FROM_INIT=0
+FROM_INIT_PATH=""
+EXPRESS=0
+
+# CLI-provided values — when set, the corresponding prompt is bypassed entirely.
+CLI_PREFIX=""
+CLI_LABEL=""
+CLI_LOCAL_PATH=""        # user-facing alias for --from-init
+CLI_SERVER_PATH=""
+CLI_ZIP_PATH=""
+CLI_GITHUB_HOST=""
+CLI_GITHUB_KEY=""
+CLI_SSH_HOST=""
+CLI_SSH_HOSTNAME=""
+CLI_SSH_USER=""
+CLI_SSH_PORT=""
+CLI_SERVER_KEY=""
+CLI_SERVER_GITHUB_ALIAS=""
+CLI_SERVER_REMOTE=""
+CLI_NO_SERVER=0
 
 
 # ---------------------------------------------------------------------
@@ -114,14 +137,34 @@ ask() {
   [ -n "$answer" ] && printf '%s' "$answer" || printf '%s' "$default"
 }
 
-# confirm "Question" -> returns 0 (yes) or 1 (no)
+# confirm "Question" -> returns 0 (yes) or 1 (no).
+# In express mode, always returns 0 (yes) without prompting.
 confirm() {
+  if [ "$EXPRESS" -eq 1 ]; then
+    printf '  %s [Y/n]: Y  (express)\n' "$1"
+    return 0
+  fi
   local raw=""
   read -r -p "  $1 [Y/n]: " raw
   case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
     n|no) return 1 ;;
     *)    return 0 ;;
   esac
+}
+
+# confirm_repo "owner/repo" -> GitHub-style type-to-confirm for repo deletion.
+# Always interactive — this is the safety gate in express uninstall mode.
+confirm_repo() {
+  local repo="$1"
+  printf '\n  To confirm deletion, type the repository name (%s): ' "$repo"
+  local typed=""
+  read -r typed
+  if [ "$typed" = "$repo" ]; then
+    return 0
+  else
+    warn "  Input did not match — skipping GitHub repo deletion."
+    return 1
+  fi
 }
 
 
@@ -588,8 +631,13 @@ EOF
   # Test loop — let the user retry once or twice while they finish
   # adding the deploy key on GitHub (it usually takes a few seconds for
   # GitHub to recognize a freshly-added deploy key).
+  # In express mode, run the test exactly once (confirm auto-yes would
+  # otherwise cause an infinite retry loop on failure).
   local attempt=1
-  while true; do
+  local max_attempts=99   # effectively unlimited in interactive mode
+  [ "$EXPRESS" -eq 1 ] && max_attempts=1
+
+  while [ "$attempt" -le "$max_attempts" ]; do
     echo
     if ! confirm "     Done adding the key on GitHub? Test the alias from the server now?"; then
       info "  Skipping the test."
@@ -621,10 +669,10 @@ EOF
     echo "    - The IdentityFile path in the server's ~/.ssh/config is wrong"
     echo "      (look for 'no such identity' above)."
     echo
-    if ! confirm "     Try again?"; then
+    attempt=$((attempt + 1))
+    if [ "$attempt" -gt "$max_attempts" ] || ! confirm "     Try again?"; then
       break
     fi
-    attempt=$((attempt + 1))
   done
 
   echo
@@ -646,38 +694,58 @@ install_flow() {
 
   echo
   info "git-deploy-workflow bootstrap"
-  cat <<'EOF'
+  if [ "$EXPRESS" -eq 1 ]; then
+    info "  (express mode — only essential prompts; everything else is auto-derived)"
+  fi
+  if [ "$FROM_INIT" -eq 1 ]; then
+    info "  (chained from gdw-init — local clone path already confirmed)"
+  fi
+  if [ "$EXPRESS" -eq 0 ]; then
+    cat <<'EOF'
 This will set up an edit/commit/push workflow for a project, with an
 optional deploy step for projects that live on a remote server.
 
 Nothing is written until you confirm the plan. ~/.zshrc and ~/.ssh/config
 are backed up before modification.
 EOF
+  fi
 
   # ----- Mode: with-server vs. no-server ----------------------
   section "Mode"
-  cat <<'EOF'
+
+  HAS_SERVER=1
+  if [ "$CLI_NO_SERVER" -eq 1 ]; then
+    HAS_SERVER=0
+    info "  No-server mode  (--no-server)"
+  else
+    if [ "$EXPRESS" -eq 0 ]; then
+      cat <<'EOF'
 Some projects deploy to a remote server when you push, such as WordPress
 plugins, WordPress themes, Django apps, and static sites. Others are just
 GitHub repos where you only want the local git aliases.
 EOF
-  echo
-
-  HAS_SERVER=1
-  if ! confirm "Does this project deploy to a remote server?"; then
-    HAS_SERVER=0
-    info "  No-server mode: push commands will commit + push only, no deploy."
+      echo
+    fi
+    if ! confirm "Does this project deploy to a remote server?"; then
+      HAS_SERVER=0
+      info "  No-server mode: push commands will commit + push only, no deploy."
+    fi
   fi
 
   # ----- Project identity -------------------------------------
   # Project name is auto-derived from the current directory if we're
-  # running inside one — that matches the new init-project flow.
-  # Otherwise prompt for it.
+  # running inside one (or from the --from-init path). Otherwise prompt.
   section "Project info"
   local pwd_basename
   pwd_basename="$(basename "$(pwd)")"
 
-  if [ -d "$(pwd)/.git" ] || [ "$pwd_basename" != "$(basename "$SCRIPT_DIR")" ]; then
+  if [ -n "$CLI_LABEL" ]; then
+    PROJECT_LABEL="$CLI_LABEL"
+    ok "  Project name: $PROJECT_LABEL  (--label)"
+  elif [ "$FROM_INIT" -eq 1 ] && [ -n "$FROM_INIT_PATH" ]; then
+    PROJECT_LABEL="$(basename "$FROM_INIT_PATH")"
+    info "  Project name: $PROJECT_LABEL    (from gdw-init)"
+  elif [ -d "$(pwd)/.git" ] || [ "$pwd_basename" != "$(basename "$SCRIPT_DIR")" ]; then
     PROJECT_LABEL="$pwd_basename"
     info "  Project name: $PROJECT_LABEL    (from current directory)"
   else
@@ -685,7 +753,21 @@ EOF
     PROJECT_LABEL="$(ask 'Project name (human-readable)' 'My Project')"
   fi
 
-  PROJECT_PREFIX="$(ask 'Command prefix (lowercase; e.g. theme gives themepull/themepush)' 'mp')"
+  if [ -n "$CLI_PREFIX" ]; then
+    PROJECT_PREFIX="$CLI_PREFIX"
+    ok "  Command prefix: $PROJECT_PREFIX  (--prefix)"
+  elif [ "$EXPRESS" -eq 1 ]; then
+    # Auto-derive from project label: lowercase, strip anything not [a-z0-9_],
+    # then strip any leading digits/underscores so it starts with a letter.
+    PROJECT_PREFIX="$(printf '%s' "$PROJECT_LABEL" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr -cd 'a-z0-9_' \
+      | sed 's/^[0-9_]*//')"
+    [ -z "$PROJECT_PREFIX" ] && PROJECT_PREFIX="project"
+    ok "  Command prefix: $PROJECT_PREFIX  (auto-derived from project name)"
+  else
+    PROJECT_PREFIX="$(ask 'Command prefix (lowercase; e.g. theme gives themepull/themepush)' 'mp')"
+  fi
 
   if ! printf '%s' "$PROJECT_PREFIX" | grep -Eq '^[a-z][a-z0-9_]*$'; then
     err "Prefix must start with a lowercase letter and contain only [a-z0-9_]."
@@ -702,20 +784,24 @@ EOF
     section "Existing setup detected"
     cat /tmp/.bootstrap-existing.$$
     rm -f /tmp/.bootstrap-existing.$$
-    echo
-    cat <<EOF
+    if [ "$EXPRESS" -eq 1 ]; then
+      info "  Express mode — replacing existing setup automatically."
+    else
+      echo
+      cat <<EOF
 You can:
   (r) replace — back up existing files, strip old marker blocks,
       and reinstall with the new answers.
   (a) abort  — pick a different prefix or run with --uninstall first.
 EOF
-    echo
-    local choice
-    read -r -p "  Choose [r/a]: " choice
-    case "$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')" in
-      r|replace) info "  Will replace existing setup." ;;
-      *)         warn "Aborted."; exit 0 ;;
-    esac
+      echo
+      local choice
+      read -r -p "  Choose [r/a]: " choice
+      case "$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')" in
+        r|replace) info "  Will replace existing setup." ;;
+        *)         warn "Aborted."; exit 0 ;;
+      esac
+    fi
   else
     rm -f /tmp/.bootstrap-existing.$$
   fi
@@ -730,8 +816,35 @@ EOF
   else
     repo_path_default="$HOME/Code/$PROJECT_PREFIX"
   fi
-  REPO_PATH="$(ask 'Local clone path of the project' "$repo_path_default")"
-  ZIP_PATH="$(ask 'Local zip output path (for review/distribution)' "$HOME/Downloads/${PROJECT_PREFIX}-review.zip")"
+
+  # --local-path flag and --from-init both set the repo path without prompting.
+  local resolved_local_path="${CLI_LOCAL_PATH:-${FROM_INIT_PATH:-}}"
+  if [ -n "$resolved_local_path" ]; then
+    REPO_PATH="$resolved_local_path"
+    ok "  Local clone path: $REPO_PATH"
+  elif [ "$EXPRESS" -eq 1 ] && [ "$repo_path_default" = "$(pwd)" ]; then
+    REPO_PATH="$repo_path_default"
+    ok "  Local clone path: $REPO_PATH  (current directory)"
+  else
+    REPO_PATH="$(ask 'Local clone path of the project' "$repo_path_default")"
+  fi
+
+  # Zip output path — CLI flag > config default > prompt.
+  local zip_default
+  if [ -n "${GDW_DEFAULT_ZIP_DIR:-}" ]; then
+    zip_default="${GDW_DEFAULT_ZIP_DIR%/}/${PROJECT_PREFIX}-review.zip"
+  else
+    zip_default="$HOME/Downloads/${PROJECT_PREFIX}-review.zip"
+  fi
+  if [ -n "$CLI_ZIP_PATH" ]; then
+    ZIP_PATH="$CLI_ZIP_PATH"
+    ok "  Zip output path:  $ZIP_PATH  (--zip-path)"
+  elif [ -n "${GDW_DEFAULT_ZIP_DIR:-}" ] || [ "$EXPRESS" -eq 1 ]; then
+    ZIP_PATH="$zip_default"
+    ok "  Zip output path:  $ZIP_PATH"
+  else
+    ZIP_PATH="$(ask 'Local zip output path (for review/distribution)' "$zip_default")"
+  fi
 
   # Server-mode-only fields. In no-server mode these stay empty so the
   # rendered workflow knows there is nothing to deploy.
@@ -746,13 +859,29 @@ EOF
   ADD_SERVER_HOST=0
 
   if [ "$HAS_SERVER" -eq 1 ]; then
-    SERVER_PATH_DEFAULT='$HOME/path/to/'"$PROJECT_PREFIX"
-    SERVER_PATH="$(ask 'Project path on the server' "$SERVER_PATH_DEFAULT")"
+    if [ -n "$CLI_SERVER_PATH" ]; then
+      SERVER_PATH="$CLI_SERVER_PATH"
+      ok "  Server path: $SERVER_PATH  (--server-path)"
+    else
+      SERVER_PATH_DEFAULT='$HOME/path/to/'"$PROJECT_PREFIX"
+      SERVER_PATH="$(ask 'Project path on the server' "$SERVER_PATH_DEFAULT")"
+    fi
   fi
 
   # ----- GitHub SSH -------------------------------------------
   section "GitHub SSH"
-  GITHUB_HOST="$(ask 'GitHub SSH host' 'github.com')"
+  if [ -n "$CLI_GITHUB_HOST" ]; then
+    GITHUB_HOST="$CLI_GITHUB_HOST"
+    ok "  GitHub SSH host: $GITHUB_HOST  (--github-host)"
+  elif [ -n "${GDW_DEFAULT_GITHUB_HOST:-}" ]; then
+    GITHUB_HOST="$GDW_DEFAULT_GITHUB_HOST"
+    ok "  Using GitHub SSH host from ~/.gdw-config: $GITHUB_HOST"
+  elif [ "$EXPRESS" -eq 1 ]; then
+    GITHUB_HOST="github.com"
+    ok "  GitHub SSH host: github.com  (express default)"
+  else
+    GITHUB_HOST="$(ask 'GitHub SSH host' 'github.com')"
+  fi
   GITHUB_KEY=""
   ADD_GITHUB_HOST=1
 
@@ -762,18 +891,30 @@ EOF
     EXISTING_GITHUB_KEY="$(expand_ssh_path "$EXISTING_GITHUB_KEY")"
 
     if [ -n "$EXISTING_GITHUB_KEY" ]; then
-      GITHUB_KEY="$EXISTING_GITHUB_KEY"
+      GITHUB_KEY="${CLI_GITHUB_KEY:-$EXISTING_GITHUB_KEY}"
       ok "  Using existing GitHub key: $GITHUB_KEY"
     else
       warn "  Host $GITHUB_HOST exists, but no IdentityFile was found."
-      GITHUB_KEY="$(ask 'GitHub key path to use or create' "$HOME/.ssh/id_ed25519")"
+      local gh_key_fallback="${CLI_GITHUB_KEY:-$HOME/.ssh/id_ed25519}"
+      if [ -n "$CLI_GITHUB_KEY" ] || [ "$EXPRESS" -eq 1 ]; then
+        GITHUB_KEY="$gh_key_fallback"
+        ok "  GitHub key: $GITHUB_KEY"
+      else
+        GITHUB_KEY="$(ask 'GitHub key path to use or create' "$gh_key_fallback")"
+      fi
     fi
 
     ADD_GITHUB_HOST=0
     info "  Skipping duplicate GitHub SSH config setup."
   else
     warn "  No Host $GITHUB_HOST block found in $SSH_CONFIG."
-    GITHUB_KEY="$(ask 'GitHub key path to use or create' "$HOME/.ssh/${PROJECT_PREFIX}_github")"
+    local gh_key_default="${CLI_GITHUB_KEY:-$HOME/.ssh/${PROJECT_PREFIX}_github}"
+    if [ -n "$CLI_GITHUB_KEY" ] || [ "$EXPRESS" -eq 1 ]; then
+      GITHUB_KEY="$gh_key_default"
+      ok "  GitHub key: $GITHUB_KEY"
+    else
+      GITHUB_KEY="$(ask 'GitHub key path to use or create' "$gh_key_default")"
+    fi
     ADD_GITHUB_HOST=1
   fi
 
@@ -781,9 +922,15 @@ EOF
   if [ "$HAS_SERVER" -eq 1 ]; then
     section "Production server SSH"
     local ssh_host_default="${PROJECT_PREFIX}-prod"
-    if [ -n "${GDW_DEFAULT_SSH_HOST:-}" ]; then
+    if [ -n "$CLI_SSH_HOST" ]; then
+      SSH_HOST="$CLI_SSH_HOST"
+      ok "  SSH host alias: $SSH_HOST  (--ssh-host)"
+    elif [ -n "${GDW_DEFAULT_SSH_HOST:-}" ]; then
       SSH_HOST="$GDW_DEFAULT_SSH_HOST"
       ok "  Using SSH host from ~/.gdw-config: $SSH_HOST"
+    elif [ "$EXPRESS" -eq 1 ]; then
+      SSH_HOST="$ssh_host_default"
+      ok "  SSH host alias: $SSH_HOST  (express default)"
     else
       SSH_HOST="$(ask 'SSH host alias to use locally' "$ssh_host_default")"
     fi
@@ -807,26 +954,67 @@ EOF
       plan "Port:     $SSH_PORT"
 
       if [ -n "$SERVER_KEY" ]; then
+        SERVER_KEY="${CLI_SERVER_KEY:-$SERVER_KEY}"
         plan "Key:      $SERVER_KEY"
       else
         warn "  Host $SSH_HOST exists, but no IdentityFile was found."
-        SERVER_KEY="$(ask 'Server key path to use or create' "$HOME/.ssh/${PROJECT_PREFIX}_server")"
+        local srv_key_fallback="${CLI_SERVER_KEY:-$HOME/.ssh/${PROJECT_PREFIX}_server}"
+        if [ -n "$CLI_SERVER_KEY" ] || [ "$EXPRESS" -eq 1 ]; then
+          SERVER_KEY="$srv_key_fallback"
+          ok "  Server key: $SERVER_KEY"
+        else
+          SERVER_KEY="$(ask 'Server key path to use or create' "$srv_key_fallback")"
+        fi
       fi
 
       ADD_SERVER_HOST=0
       info "  Skipping duplicate server SSH config setup."
     else
       warn "  No Host $SSH_HOST block found in $SSH_CONFIG."
-      SSH_HOSTNAME="$(ask 'Server hostname or IP' 'example.com')"
-      SSH_USER="$(ask 'Server SSH user' 'deploy')"
-      SSH_PORT="$(ask 'Server SSH port' '22')"
-      SERVER_KEY="$(ask 'Server key path to use or create' "$HOME/.ssh/${PROJECT_PREFIX}_server")"
+      # Hostname is the one field that can't be safely guessed; ask unless
+      # --ssh-hostname was provided.
+      if [ -n "$CLI_SSH_HOSTNAME" ]; then
+        SSH_HOSTNAME="$CLI_SSH_HOSTNAME"
+        ok "  SSH hostname: $SSH_HOSTNAME  (--ssh-hostname)"
+      else
+        SSH_HOSTNAME="$(ask 'Server hostname or IP' 'example.com')"
+      fi
+      local srv_user_default="${CLI_SSH_USER:-$(whoami)}"
+      local srv_port_default="${CLI_SSH_PORT:-22}"
+      local srv_key_default="${CLI_SERVER_KEY:-$HOME/.ssh/${PROJECT_PREFIX}_server}"
+      if [ -n "$CLI_SSH_USER" ] || [ -n "$CLI_SSH_PORT" ] || \
+         [ -n "$CLI_SERVER_KEY" ] || [ "$EXPRESS" -eq 1 ]; then
+        SSH_USER="$srv_user_default"
+        SSH_PORT="$srv_port_default"
+        SERVER_KEY="$srv_key_default"
+        ok "  SSH user: $SSH_USER  port: $SSH_PORT  key: $SERVER_KEY"
+      else
+        SSH_USER="$(ask 'Server SSH user' "$srv_user_default")"
+        SSH_PORT="$(ask 'Server SSH port' "$srv_port_default")"
+        SERVER_KEY="$(ask 'Server key path to use or create' "$srv_key_default")"
+      fi
       ADD_SERVER_HOST=1
     fi
 
     # ----- Server-side GitHub alias (per-repo deploy key) ------------
     section "Server-side GitHub deploy key"
-    cat <<'EOF'
+
+    # Compute the alias. GDW_DEFAULT_SERVER_GITHUB_ALIAS supports a
+    # __PREFIX__ placeholder that is substituted at runtime, e.g.
+    #   GDW_DEFAULT_SERVER_GITHUB_ALIAS="github-__PREFIX__"
+    local alias_default="github-${PROJECT_PREFIX}"
+    if [ -n "${GDW_DEFAULT_SERVER_GITHUB_ALIAS:-}" ]; then
+      alias_default="${GDW_DEFAULT_SERVER_GITHUB_ALIAS//__PREFIX__/$PROJECT_PREFIX}"
+    fi
+
+    if [ -n "$CLI_SERVER_GITHUB_ALIAS" ]; then
+      SERVER_GITHUB_ALIAS="$CLI_SERVER_GITHUB_ALIAS"
+      ok "  Server-side GitHub alias: $SERVER_GITHUB_ALIAS  (--server-github-alias)"
+    elif [ "$EXPRESS" -eq 1 ] || [ -n "${GDW_DEFAULT_SERVER_GITHUB_ALIAS:-}" ]; then
+      SERVER_GITHUB_ALIAS="$alias_default"
+      ok "  Server-side GitHub alias: $SERVER_GITHUB_ALIAS  (auto-derived)"
+    else
+      cat <<'EOF'
 The server fetches the repo through a unique SSH alias so each repo
 can have its own read-only deploy key. The alias lives in the SERVER's
 ~/.ssh/config (the bootstrap will write it there for you), so it does
@@ -834,8 +1022,9 @@ NOT need to exist on this Mac and your local origin URL is unchanged.
 
 Recommended naming: github-<prefix>  (e.g. github-theme).
 EOF
-    echo
-    SERVER_GITHUB_ALIAS="$(ask 'Server-side GitHub host alias' "github-${PROJECT_PREFIX}")"
+      echo
+      SERVER_GITHUB_ALIAS="$(ask 'Server-side GitHub host alias' "$alias_default")"
+    fi
 
     # Try to derive the server remote URL from the local repo's origin.
     # Handle both SSH and HTTPS origin URLs:
@@ -857,7 +1046,29 @@ EOF
     if [ -z "$server_remote_default" ]; then
       server_remote_default="git@${SERVER_GITHUB_ALIAS}:<you>/<repo>.git"
     fi
-    SERVER_REMOTE="$(ask 'Server-side GitHub remote URL (uses the alias above)' "$server_remote_default")"
+
+    # Auto-use the derived URL when it looks complete (i.e. came from the
+    # local repo's origin rather than being the placeholder fallback).
+    local remote_is_derived=0
+    if [ -n "$local_origin" ] && \
+       [ "$server_remote_default" != "git@${SERVER_GITHUB_ALIAS}:<you>/<repo>.git" ]; then
+      remote_is_derived=1
+    fi
+
+    if [ -n "$CLI_SERVER_REMOTE" ]; then
+      SERVER_REMOTE="$CLI_SERVER_REMOTE"
+      ok "  Server-side remote: $SERVER_REMOTE  (--server-remote)"
+    elif [ "$remote_is_derived" -eq 1 ] && [ "$EXPRESS" -eq 1 ]; then
+      SERVER_REMOTE="$server_remote_default"
+      ok "  Server-side remote: $SERVER_REMOTE  (auto-derived from local origin)"
+    elif [ "$remote_is_derived" -eq 1 ]; then
+      ok "  Detected server-side remote from local origin: $server_remote_default"
+      local override_remote=""
+      read -r -p "  Server-side GitHub remote URL [$server_remote_default]: " override_remote
+      SERVER_REMOTE="${override_remote:-$server_remote_default}"
+    else
+      SERVER_REMOTE="$(ask 'Server-side GitHub remote URL (uses the alias above)' "$server_remote_default")"
+    fi
   fi
 
   WORKFLOW_DEST="$HOME/.${PROJECT_PREFIX}-workflow.zsh"
@@ -905,7 +1116,7 @@ EOF
     return 0
   fi
 
-  if ! confirm "Proceed?"; then
+  if [ "$EXPRESS" -eq 0 ] && ! confirm "Proceed?"; then
     warn "Cancelled."
     return 0
   fi
@@ -922,9 +1133,8 @@ EOF
   fi
 
   # ssh-config patching: only run if there is actually something to add.
+  section "Patching ~/.ssh/config"
   if [ "$ADD_GITHUB_HOST" -eq 1 ] || { [ "$HAS_SERVER" -eq 1 ] && [ "$ADD_SERVER_HOST" -eq 1 ]; }; then
-    section "Patching ~/.ssh/config"
-
     if [ -f "$SSH_CONFIG" ] && grep -Fq "$SSH_START" "$SSH_CONFIG"; then
       warn "  ~/.ssh/config already has a block for this project — replacing it."
       backup="$(backup_file "$SSH_CONFIG")"
@@ -947,7 +1157,6 @@ EOF
     chmod 600 "$SSH_CONFIG"
     ok "  Updated: $SSH_CONFIG"
   else
-    section "Patching ~/.ssh/config"
     info "  Existing SSH config already has the needed host entries — no changes made."
   fi
 
@@ -957,14 +1166,11 @@ EOF
   ok "  Wrote: $WORKFLOW_DEST"
 
   section "Patching ~/.zshrc"
+  backup="$(backup_file "$ZSHRC")"
+  [ -n "${backup:-}" ] && info "  Backup: $backup"
   if [ -f "$ZSHRC" ] && grep -Fq "$ZSHRC_START" "$ZSHRC"; then
     warn "  ~/.zshrc already has a block for prefix '$PROJECT_PREFIX' — replacing it."
-    backup="$(backup_file "$ZSHRC")"
-    [ -n "${backup:-}" ] && info "  Backup: $backup"
     strip_block "$ZSHRC" "$ZSHRC_START" "$ZSHRC_END"
-  else
-    backup="$(backup_file "$ZSHRC")"
-    [ -n "${backup:-}" ] && info "  Backup: $backup"
   fi
   append_block "$ZSHRC" "$ZSHRC_START" "$ZSHRC_END" "$ZSHRC_BLOCK_BODY"
   ok "  Updated: $ZSHRC"
@@ -1039,6 +1245,28 @@ EOF
 
   ok "Bootstrap complete."
 
+  # ----- Optional: run the initial server deploy ----------------------
+  # After bootstrap, the server has a deploy key and the workflow is
+  # installed. Offer to do the first server-side clone/pull right now
+  # by sourcing the rendered workflow in a new zsh process and calling
+  # deploy-${PROJECT_PREFIX} (which runs _gdw_deploy — handles both
+  # fresh clone and pull-on-existing-repo transparently).
+  if [ "$HAS_SERVER" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+    echo
+    info "  The workflow is ready. Want to run the initial server deploy now?"
+    info "  This SSHes into $SSH_HOST and clones/pulls the repo at $SERVER_PATH."
+    if confirm "  Run deploy-${PROJECT_PREFIX} (initial server-side deploy) now?"; then
+      info "  → Running deploy-${PROJECT_PREFIX}..."
+      if zsh -c "source '${WORKFLOW_DEST}' && deploy-${PROJECT_PREFIX}"; then
+        ok "  Initial deploy complete."
+      else
+        warn "  Deploy encountered an error — check output above."
+        warn "  After reloading your shell you can retry with:"
+        echo "       exec zsh && deploy-${PROJECT_PREFIX}"
+      fi
+    fi
+  fi
+
   # Auto-install gdw-bootstrap alias on first run, same pattern as
   # init-project's gdw-init alias.
   local boot_alias_start="# >>> gdw-bootstrap alias >>>"
@@ -1079,7 +1307,12 @@ EOF
 # ---------------------------------------------------------------------
 
 uninstall_flow() {
-  PROJECT_PREFIX="$(ask 'Prefix to remove (the one you used during bootstrap)' '')"
+  if [ -n "$CLI_PREFIX" ]; then
+    PROJECT_PREFIX="$CLI_PREFIX"
+    ok "  Prefix: $PROJECT_PREFIX"
+  else
+    PROJECT_PREFIX="$(ask 'Prefix to remove (the one you used during bootstrap)' '')"
+  fi
   if [ -z "$PROJECT_PREFIX" ]; then
     err "Prefix is required."
     exit 1
@@ -1094,8 +1327,10 @@ uninstall_flow() {
   section "Plan"
   plan "Strip block from ~/.zshrc       (markers: $ZSHRC_START / $ZSHRC_END)"
   plan "Strip block from ~/.ssh/config  (markers: $SSH_START / $SSH_END)"
-  plan "Workflow file at $WORKFLOW_DEST will be left in place"
-  plan "SSH keys will be left in place (delete manually if desired)"
+  plan "Server-side: remove deploy key + SSH alias block"
+  plan "Server-side: delete project folder"
+  plan "GitHub: delete repo via gh CLI  (type repo name to confirm)"
+  plan "Workflow file, SSH keys, shared lib left for manual cleanup"
   echo
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -1123,8 +1358,143 @@ uninstall_flow() {
   fi
 
   echo
-  ok "Uninstall complete."
-  info "If you also want to remove the workflow file:"
+  ok "Local uninstall complete."
+
+  # ----- Server-side cleanup ------------------------------------------
+  # Read server details from the workflow file (if it still exists) so
+  # we know which host to SSH into and what path to offer to delete.
+  local uninstall_ssh_host="" uninstall_server_path="" uninstall_server_alias=""
+  local uninstall_server_remote=""
+  if [ -f "$WORKFLOW_DEST" ]; then
+    uninstall_ssh_host="$(grep -E '^\s*GDW_SSH_HOST=' "$WORKFLOW_DEST" \
+      | sed -E 's/.*="(.*)"/\1/' | head -1)"
+    uninstall_server_path="$(grep -E '^\s*GDW_SERVER_PATH=' "$WORKFLOW_DEST" \
+      | sed -E "s/.*='(.*)'/\1/;s/.*=\"(.*)\"/\1/" | head -1)"
+    uninstall_server_remote="$(grep -E '^\s*GDW_SERVER_REMOTE=' "$WORKFLOW_DEST" \
+      | sed -E 's/.*="(.*)"/\1/' | head -1)"
+    # Extract the SSH alias from git@<alias>:owner/repo.git
+    if [ -n "$uninstall_server_remote" ]; then
+      uninstall_server_alias="$(printf '%s' "$uninstall_server_remote" \
+        | sed -E 's|git@([^:]+):.*|\1|')"
+    fi
+    # Fall back to the conventional alias name.
+    [ -z "$uninstall_server_alias" ] && uninstall_server_alias="github-${PROJECT_PREFIX}"
+  fi
+
+  if [ -n "$uninstall_ssh_host" ]; then
+    section "Server-side cleanup  (${uninstall_ssh_host})"
+
+    # --- Deploy key removal ---
+    echo
+    info "  The bootstrap created a read-only deploy key on $uninstall_ssh_host:"
+    echo "      ~/.ssh/${PROJECT_PREFIX}_github_deploy  (and .pub)"
+    echo "      Host ${uninstall_server_alias} block in server ~/.ssh/config"
+    echo
+    if confirm "  Remove the deploy key and SSH alias from $uninstall_ssh_host?"; then
+      local remote_key="~/.ssh/${PROJECT_PREFIX}_github_deploy"
+      local srv_marker_start="# >>> ${PROJECT_PREFIX} ${uninstall_server_alias} alias >>>"
+      local srv_marker_end="# <<< ${PROJECT_PREFIX} ${uninstall_server_alias} alias <<<"
+      if ssh "$uninstall_ssh_host" "
+        set -e
+        removed=0
+        if [ -f $remote_key ]; then
+          rm -f $remote_key ${remote_key}.pub
+          echo 'Removed deploy key: $remote_key'
+          removed=1
+        else
+          echo 'Deploy key not found (already removed?): $remote_key'
+        fi
+        if [ -f \$HOME/.ssh/config ] && grep -Fq '$srv_marker_start' \$HOME/.ssh/config; then
+          awk -v s='$srv_marker_start' -v e='$srv_marker_end' '
+            BEGIN{skip=0}
+            \$0==s{skip=1;next}
+            skip && \$0==e{skip=0;next}
+            !skip{print}
+          ' \$HOME/.ssh/config > \$HOME/.ssh/config.new \
+            && mv \$HOME/.ssh/config.new \$HOME/.ssh/config
+          chmod 600 \$HOME/.ssh/config
+          echo 'Removed Host ${uninstall_server_alias} block from server ~/.ssh/config'
+        else
+          echo 'No Host ${uninstall_server_alias} block found in server ~/.ssh/config'
+        fi
+      "; then
+        ok "  Server-side deploy key cleaned up."
+      else
+        warn "  SSH command failed — you may need to clean up manually on $uninstall_ssh_host."
+      fi
+    fi
+
+    # --- Server project folder removal ---
+    if [ -n "$uninstall_server_path" ]; then
+      echo
+      warn "  Server project folder: ${uninstall_ssh_host}:${uninstall_server_path}"
+      if confirm "  Delete the project folder on the server?"; then
+        warn "  ⚠  This permanently deletes: ${uninstall_ssh_host}:${uninstall_server_path}"
+        if confirm "  Confirm — delete ${uninstall_server_path} on ${uninstall_ssh_host}?"; then
+          if ssh "$uninstall_ssh_host" "rm -rf '${uninstall_server_path}'"; then
+            ok "  Deleted: ${uninstall_server_path} on ${uninstall_ssh_host}"
+          else
+            warn "  Deletion failed — check permissions on $uninstall_ssh_host."
+          fi
+        else
+          info "  Folder deletion skipped."
+        fi
+      fi
+    fi
+  fi
+
+  # ----- GitHub repo deletion -----------------------------------------
+  # Derive owner/repo slug from the workflow file so we can offer a
+  # `gh repo delete` step.  Tries GDW_SERVER_REMOTE first (always present
+  # after bootstrap); falls back to reading the local git origin.
+  local uninstall_gh_repo=""
+  if [ -f "$WORKFLOW_DEST" ]; then
+    if [ -n "${uninstall_server_remote:-}" ]; then
+      # git@github-alias:owner/repo.git  →  owner/repo
+      uninstall_gh_repo="$(printf '%s' "$uninstall_server_remote" \
+        | sed -E 's|git@[^:]+:(.+)|\1|' | sed -E 's|\.git$||')"
+    fi
+    # Fallback: read origin from the local clone
+    if [ -z "$uninstall_gh_repo" ]; then
+      local uninstall_local_path
+      uninstall_local_path="$(grep -E '^\s*GDW_REPO=' "$WORKFLOW_DEST" \
+        | sed -E "s/.*='(.*)'/\1/;s/.*=\"(.*)\"/\1/" | head -1)"
+      if [ -n "$uninstall_local_path" ] && [ -d "$uninstall_local_path" ]; then
+        local local_origin_url
+        local_origin_url="$(cd "$uninstall_local_path" \
+          && git config --get remote.origin.url 2>/dev/null || true)"
+        uninstall_gh_repo="$(printf '%s' "$local_origin_url" \
+          | sed -E 's|git@github\.com:(.+)|\1|;s|https://github\.com/(.+)|\1|' \
+          | sed -E 's|\.git$||')"
+      fi
+    fi
+  fi
+
+  if [ -n "$uninstall_gh_repo" ]; then
+    echo
+    section "GitHub repo cleanup"
+    info "  Repository: github.com/${uninstall_gh_repo}"
+    echo
+    if confirm "  Delete the GitHub repo (gh repo delete)?"; then
+      if confirm_repo "$uninstall_gh_repo"; then
+        if command -v gh >/dev/null 2>&1; then
+          if gh repo delete "$uninstall_gh_repo" --yes; then
+            ok "  GitHub repo deleted: ${uninstall_gh_repo}"
+          else
+            warn "  gh repo delete failed — delete manually at:"
+            echo "      https://github.com/${uninstall_gh_repo}/settings"
+          fi
+        else
+          warn "  gh CLI not found — delete the repo manually at:"
+          echo "      https://github.com/${uninstall_gh_repo}/settings"
+        fi
+      fi
+    fi
+  fi
+
+  # ----- Local remaining cleanup hints --------------------------------
+  section "Remaining local files  (manual)"
+  info "Workflow file:"
   echo "    rm $WORKFLOW_DEST"
 
   # Count marker blocks still in ~/.zshrc. If zero remain, no project
@@ -1135,15 +1505,11 @@ uninstall_flow() {
   fi
 
   if [ -f "$LIB_DEST" ] && [ "$other_projects" -eq 0 ]; then
-    info "No other projects are sourcing the shared library. You can remove it:"
+    info "Shared library (no other projects using it):"
     echo "    rm $LIB_DEST"
   elif [ -f "$LIB_DEST" ]; then
     info "Shared library left in place ($other_projects other project(s) still use it)."
   fi
-
-  info "And the SSH keys, if you generated them:"
-  echo "    rm ~/.ssh/${PROJECT_PREFIX}_github  ~/.ssh/${PROJECT_PREFIX}_github.pub"
-  echo "    rm ~/.ssh/${PROJECT_PREFIX}_server  ~/.ssh/${PROJECT_PREFIX}_server.pub"
 }
 
 
@@ -1156,25 +1522,82 @@ usage() {
 bootstrap-deploy.sh — install a customized git deploy workflow.
 
 Usage:
-  bash bootstrap-deploy.sh              # install
-  bash bootstrap-deploy.sh --dry-run    # preview without changes
-  bash bootstrap-deploy.sh --uninstall  # remove a previous bootstrap
-  bash bootstrap-deploy.sh --help
+  bash bootstrap-deploy.sh [options]
 
-Options:
-  --dry-run     Print every planned change but write nothing.
-  --uninstall   Strip a previous bootstrap's blocks from ~/.zshrc and ~/.ssh/config.
-                Leaves your workflow file and SSH keys in place.
-  --help, -h    Show this message.
+Modes:
+  (default)              Interactive install.
+  --dry-run              Preview every planned change; write nothing.
+  --uninstall            Remove a previous bootstrap from ~/.zshrc, ~/.ssh/config,
+                         the server (deploy key + folder), and GitHub repo.
+  --express              Auto-yes all confirmation prompts; runs every step without pausing.
+                         In uninstall mode, the only prompt is typing the GitHub repo name
+                         to confirm deletion (GitHub-style safety gate).
+                         Combine with flags below for a fully non-interactive install/uninstall.
+
+Project flags:
+  --prefix <p>           Command prefix  (e.g. theme → themepull / themepush)
+  --label <l>            Human-readable project name
+  --local-path <path>    Local clone path of the project (skips that prompt)
+  --server-path <path>   Project path on the production server
+  --zip-path <path>      Full path for zip review archives
+  --no-server            No-server mode: commit + push only, no deploy step
+
+GitHub flags:
+  --github-host <host>   GitHub SSH hostname  (default: github.com)
+  --github-key <path>    Path to the local GitHub SSH key
+
+Server SSH flags:
+  --ssh-host <alias>     SSH host alias in your local ~/.ssh/config
+  --ssh-hostname <host>  Actual server hostname or IP (when adding a new SSH block)
+  --ssh-user <user>      Server SSH user
+  --ssh-port <port>      Server SSH port  (default: 22)
+  --server-key <path>    Path to the server SSH key
+
+Deploy key flags:
+  --server-github-alias <alias>  Server-side GitHub SSH alias  (default: github-<prefix>)
+  --server-remote <url>          Server-side GitHub remote URL
+
+Other:
+  --from-init <path>     Set by gdw-init automatically; skips the local-path prompt.
+  --help, -h             Show this message.
+
+Examples:
+  # Fully non-interactive install:
+  bash bootstrap-deploy.sh --express \\
+    --prefix theme --server-path /var/www/html/wp-content/themes/mytheme \\
+    --ssh-host myserver --server-remote git@github-theme:you/theme.git
+
+  # Express install with SSH host already in ~/.ssh/config:
+  bash bootstrap-deploy.sh --express --prefix theme --server-path /var/www/mytheme
+
+  # Express uninstall (one prompt only — type the GitHub repo name to confirm):
+  bash bootstrap-deploy.sh --uninstall --express --prefix theme
 EOF
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dry-run)   DRY_RUN=1 ;;
-    --uninstall) UNINSTALL=1 ;;
-    --help|-h)   usage; exit 0 ;;
-    *)           err "Unknown option: $1"; usage; exit 2 ;;
+    --dry-run)    DRY_RUN=1 ;;
+    --uninstall)  UNINSTALL=1 ;;
+    --express)    EXPRESS=1 ;;
+    --from-init)          shift; FROM_INIT=1; FROM_INIT_PATH="${1:-}" ;;
+    --prefix)             shift; CLI_PREFIX="${1:-}" ;;
+    --label)              shift; CLI_LABEL="${1:-}" ;;
+    --local-path)         shift; CLI_LOCAL_PATH="${1:-}" ;;
+    --server-path)        shift; CLI_SERVER_PATH="${1:-}" ;;
+    --zip-path)           shift; CLI_ZIP_PATH="${1:-}" ;;
+    --no-server)          CLI_NO_SERVER=1 ;;
+    --github-host)        shift; CLI_GITHUB_HOST="${1:-}" ;;
+    --github-key)         shift; CLI_GITHUB_KEY="${1:-}" ;;
+    --ssh-host)           shift; CLI_SSH_HOST="${1:-}" ;;
+    --ssh-hostname)       shift; CLI_SSH_HOSTNAME="${1:-}" ;;
+    --ssh-user)           shift; CLI_SSH_USER="${1:-}" ;;
+    --ssh-port)           shift; CLI_SSH_PORT="${1:-}" ;;
+    --server-key)         shift; CLI_SERVER_KEY="${1:-}" ;;
+    --server-github-alias) shift; CLI_SERVER_GITHUB_ALIAS="${1:-}" ;;
+    --server-remote)      shift; CLI_SERVER_REMOTE="${1:-}" ;;
+    --help|-h)    usage; exit 0 ;;
+    *)            err "Unknown option: $1"; usage; exit 2 ;;
   esac
   shift
 done

@@ -11,6 +11,10 @@
 #   cp .gdw-config.example ~/.gdw-config
 #   $EDITOR ~/.gdw-config
 
+# ---------------------------------------------------------------------------
+# init-project.sh defaults
+# ---------------------------------------------------------------------------
+
 # Your GitHub username. Skips the GH username prompt in init-project.
 # GDW_DEFAULT_GH_USER="joeseverino"
 
@@ -18,6 +22,25 @@
 # One of: public, private
 # GDW_DEFAULT_GH_VISIBILITY="private"
 
-# Default SSH host alias for the production server in bootstrap-deploy.
-# This is the alias from your local ~/.ssh/config (e.g. "jseverino.net").
+# ---------------------------------------------------------------------------
+# bootstrap-deploy.sh defaults
+# ---------------------------------------------------------------------------
+
+# Default SSH host alias for the production server.
+# Must match an entry in your local ~/.ssh/config.
+# When set, bootstrap skips the SSH host alias prompt entirely.
 # GDW_DEFAULT_SSH_HOST="jseverino.net"
+
+# Default GitHub SSH hostname. Almost always "github.com".
+# When set, bootstrap skips the "GitHub SSH host" prompt.
+# GDW_DEFAULT_GITHUB_HOST="github.com"
+
+# Default directory for zip review archives (<prefix>zip).
+# The prefix and "-review.zip" suffix are appended automatically,
+# e.g. with prefix "theme": $GDW_DEFAULT_ZIP_DIR/theme-review.zip
+# GDW_DEFAULT_ZIP_DIR="$HOME/Downloads"
+
+# Server-side GitHub SSH host alias pattern.
+# __PREFIX__ is substituted with the command prefix at bootstrap time.
+# Default when unset: github-__PREFIX__  (e.g. for prefix "theme" → github-theme)
+# GDW_DEFAULT_SERVER_GITHUB_ALIAS="github-__PREFIX__"
