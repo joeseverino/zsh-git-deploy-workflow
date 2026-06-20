@@ -16,3 +16,6 @@ Thumbs.db
 # Local testing artifacts
 /tmp/
 *.log
+
+# Local docs, screenshots, writeups
+_docs/

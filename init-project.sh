@@ -664,7 +664,7 @@ if [ -f "$BOOTSTRAP" ]; then
     # bootstrap flags collected from the command line.
     bootstrap_args=("--from-init" "$PROJECT_DIR")
     [ "$INIT_EXPRESS" -eq 1 ] && bootstrap_args+=("--express")
-    bootstrap_args+=("${BOOTSTRAP_PASSTHROUGH[@]}")
+    [ "${#BOOTSTRAP_PASSTHROUGH[@]}" -gt 0 ] && bootstrap_args+=("${BOOTSTRAP_PASSTHROUGH[@]}")
     exec bash "$BOOTSTRAP" "${bootstrap_args[@]}"
   fi
 fi

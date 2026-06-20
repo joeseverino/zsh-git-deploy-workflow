@@ -511,11 +511,11 @@ generate_key() {
       info "  │                                                                 │"
       info "  │  Private key : $key_path"
       info "  │  Public key  : ${key_path}.pub  ← registered as a GitHub deploy key"
-      info "  │                                                                │"
-      info "  │  Passphrase: press Enter twice for NO passphrase.              │"
-      info "  │  (The server runs git pull non-interactively — a passphrase    │"
-      info "  │  would cause it to hang waiting for input.)                    │"
-      info "  └────────────────────────────────────────────────────────────────┘"
+      info "  │                                                                 │"
+      info "  │  Passphrase: press Enter twice for NO passphrase.               │"
+      info "  │  (The server runs git pull non-interactively — a passphrase     │"
+      info "  │  would cause it to hang waiting for input.)                     │"
+      info "  └─────────────────────────────────────────────────────────────────┘"
       ;;
     server)
       info "  ┌─ Creating your server SSH key ──────────────────────────────────┐"
